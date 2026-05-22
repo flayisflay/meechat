@@ -177,6 +177,16 @@ class MatrixWorker:
             )
             return True
 
+        if message_type == "message_action":
+            await self.message_action(
+                room_id=str(message.get("room_id") or ""),
+                event_id=str(message.get("event_id") or ""),
+                action=str(message.get("action") or ""),
+                body=str(message.get("body") or ""),
+                reason=str(message.get("reason") or ""),
+            )
+            return True
+
         if message_type == "join":
             await self.join(str(message.get("room") or ""))
             return True
@@ -426,6 +436,72 @@ class MatrixWorker:
 
         await self.emit_error(str(response), where="send_message", room_id=room_id)
 
+    async def message_action(
+        self,
+        *,
+        room_id: str,
+        event_id: str,
+        action: str,
+        body: str = "",
+        reason: str = "",
+    ) -> None:
+        if self.client is None:
+            await self.emit_error("not connected", where="message_action")
+            return
+
+        if not room_id.strip() or not event_id.strip():
+            await self.emit_error(
+                "room_id and event_id are required",
+                where="message_action",
+                room_id=room_id,
+            )
+            return
+
+        if action == "remove":
+            response = await self.client.room_redact(
+                room_id=room_id,
+                event_id=event_id,
+                reason=reason.strip() or None,
+            )
+            await self.emit_action_response(action, room_id, response)
+            return
+
+        message_type, content = _message_action_event(action, event_id, body)
+        if content is None:
+            await self.emit_error(
+                f"unsupported or incomplete message action: {action}",
+                where="message_action",
+                room_id=room_id,
+            )
+            return
+
+        response = await self.client.room_send(
+            room_id=room_id,
+            message_type=message_type,
+            content=content,
+        )
+        await self.emit_action_response(action, room_id, response)
+
+    async def emit_action_response(
+        self,
+        action: str,
+        room_id: str,
+        response: Any,
+    ) -> None:
+        event_id = getattr(response, "event_id", "")
+        if event_id:
+            await self.emit(
+                {
+                    "type": "action_ok",
+                    "action": action,
+                    "room_id": room_id,
+                    "event_id": event_id,
+                }
+            )
+            return
+
+        await self.emit_error(str(response), where="message_action", room_id=room_id)
+
     async def join(self, room: str) -> None:
         if self.client is None:
             await self.emit_error("not connected", where="join")
@@ -505,6 +581,66 @@ def _room_name(room: Any) -> str:
 
 def _room_topic(room: Any) -> str:
     return str(getattr(room, "topic", "") or "")
+
+
+def _message_action_event(
+    action: str,
+    event_id: str,
+    body: str,
+) -> tuple[str, dict[str, Any] | None]:
+    text = body.strip()
+    if action in {"reply", "thread", "edit", "reaction"} and not text:
+        return "", None
+
+    if action == "reply":
+        return (
+            "m.room.message",
+            {
+                "msgtype": "m.text",
+                "body": text,
+                "m.relates_to": {"m.in_reply_to": {"event_id": event_id}},
+            },
+        )
+
+    if action == "thread":
+        return (
+            "m.room.message",
+            {
+                "msgtype": "m.text",
+                "body": text,
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": event_id,
+                    "is_falling_back": True,
+                    "m.in_reply_to": {"event_id": event_id},
+                },
+            },
+        )
+
+    if action == "edit":
+        return (
+            "m.room.message",
+            {
+                "msgtype": "m.text",
+                "body": "* " + text,
+                "m.new_content": {"msgtype": "m.text", "body": text},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": event_id},
+            },
+        )
+
+    if action == "reaction":
+        return (
+            "m.reaction",
+            {
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": event_id,
+                    "key": text,
+                }
+            },
+        )
+
+    return "", None
 
 
 def _sender_display_name(room: Any, sender: str) -> str:
