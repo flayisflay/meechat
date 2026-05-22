@@ -134,7 +134,7 @@ Matrix room. MeeChat room buffers bind `Up`/`Down` and `Alt+Shift+Up`/
 Press `Enter` on an empty input line to open actions for the selected message:
 reply, reply in thread, edit, add reaction, remove, and permalink. Select with
 the action letter or arrow keys, press `Enter`, then complete the prompted input.
-`Ctrl+G` cancels action mode.
+`Esc` or `Ctrl+G` cancels action mode and clears the message marker.
 
 MeeChat also adds a `meechat_topic` title bar below the monitor using WeeChat's
 `buffer_title` item, populated only with the room topic and using a dark blue

@@ -80,6 +80,7 @@ INSPECT_BAR_ITEM = ""
 INSPECT_BAR = ""
 TOPIC_BAR = ""
 INSPECT_HISTORY_LIMIT = 500
+INSPECT_CANCEL_KEYS = ("ctrl-[", "meta-[", "meta-ctrl-[", "ctrl-G")
 INSPECT_ACTIONS = [
     {
         "key": "r",
@@ -569,18 +570,63 @@ def _update_room_buffer(
         ROOM_TOPICS[room_id] = topic
     weechat.buffer_set(buffer, "title", ROOM_TOPICS.get(room_id, ""))
     weechat.buffer_set(buffer, "localvar_set_type", "matrix")
+    weechat.buffer_set(buffer, "localvar_set_meechat", "1")
     weechat.buffer_set(buffer, "localvar_set_room_id", room_id)
     weechat.buffer_set(buffer, "key_bind_meta-shift-up", "/meechat inspect-prev")
     weechat.buffer_set(buffer, "key_bind_meta-shift-down", "/meechat inspect-next")
     weechat.buffer_set(buffer, "key_bind_up", "/meechat inspect-up")
     weechat.buffer_set(buffer, "key_bind_down", "/meechat inspect-down")
     weechat.buffer_set(buffer, "key_bind_ctrl-M", "/meechat inspect-enter")
-    weechat.buffer_set(buffer, "key_bind_ctrl-G", "/meechat inspect-cancel")
+    for key in INSPECT_CANCEL_KEYS:
+        weechat.buffer_set(buffer, "key_bind_" + key, "/meechat inspect-cancel")
     _log(
         "room buffer updated: "
         f"buffer={buffer} short_name={short_name!r} "
         f"title_len={len(ROOM_TOPICS.get(room_id, ''))}"
     )
+
+
+def _rehydrate_room_buffers() -> None:
+    if not hasattr(weechat, "infolist_get"):
+        _log("startup: room buffer rehydrate skipped; infolist API unavailable")
+        return
+
+    infolist = weechat.infolist_get("buffer", "", "")
+    if not infolist:
+        _log("startup: room buffer rehydrate skipped; no buffer infolist")
+        return
+
+    count = 0
+    try:
+        while weechat.infolist_next(infolist):
+            buffer = weechat.infolist_pointer(infolist, "pointer")
+            if not buffer:
+                continue
+
+            buffer_name = weechat.buffer_get_string(buffer, "name")
+            full_name = weechat.buffer_get_string(buffer, "full_name")
+            is_meechat_buffer = (
+                weechat.buffer_get_string(buffer, "localvar_meechat") == "1"
+                or buffer_name.startswith("meechat.")
+                or full_name.startswith("python.meechat.")
+                or full_name.endswith(".meechat." + buffer_name)
+            )
+            room_id = weechat.buffer_get_string(buffer, "localvar_room_id")
+            if not is_meechat_buffer or not room_id:
+                continue
+
+            room_name = weechat.buffer_get_string(buffer, "short_name") or room_id
+            topic = weechat.buffer_get_string(buffer, "title")
+            ROOM_BUFFERS[room_id] = buffer
+            BUFFER_ROOMS[buffer] = room_id
+            ROOM_NAMES[room_id] = room_name
+            ROOM_TOPICS[room_id] = topic
+            _update_room_buffer(buffer, room_id, room_name, topic=topic)
+            count += 1
+    finally:
+        weechat.infolist_free(infolist)
+
+    _log(f"startup: room buffer rehydrate complete: count={count}")
 
 
 def _print_matrix_message(message: dict[str, Any]) -> None:
@@ -822,12 +868,15 @@ def _inspect_cancel(buffer: str) -> None:
     if not room_id:
         return
 
-    if room_id in INSPECT_ACTION_STATE:
-        _log(f"inspect action mode cancelled: room_id={_redacted_text(room_id)}")
-        _exit_inspect_action_mode(buffer, room_id)
+    action_mode_active = room_id in INSPECT_ACTION_STATE
+    cursor_active = room_id in ROOM_HIGHLIGHTED_INDEX
+    if action_mode_active or cursor_active:
+        _log(f"inspect selector cancelled: room_id={_redacted_text(room_id)}")
+        _clear_inspect_action_mode(buffer, room_id)
         _set_buffer_input(buffer, "")
+        _update_inspect_bar()
     else:
-        _log("inspect cancel ignored; no action mode is active")
+        _log("inspect cancel ignored; selector is not active")
 
 
 def _choose_inspect_action(buffer: str, key: str) -> None:
@@ -1734,6 +1783,7 @@ def _register() -> None:
     )
     _log("startup: /meechat command registered")
     _ensure_inspect_bar()
+    _rehydrate_room_buffers()
 
     if _option_bool("autoconnect"):
         _log("startup: autoconnect is on; connecting")

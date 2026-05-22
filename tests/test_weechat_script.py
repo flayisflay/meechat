@@ -23,8 +23,12 @@ class FakeWeechat:
         self.line_updates = []
         self.last_line_by_lines = {}
         self.line_data_by_line = {}
+        self.buffer_strings = {}
         self.buffer_inputs = {}
         self.hook_sets = []
+        self.infolist_items = []
+        self.infolist_index = -1
+        self.freed_infolists = []
 
     def config_get_plugin(self, name):
         defaults = {"auth": "auto", "python": "python3", "debug": "off"}
@@ -49,17 +53,26 @@ class FakeWeechat:
     def buffer_new(self, name, input_cb, input_data, close_cb, close_data):
         pointer = "buffer" if not self.buffers else f"buffer-{len(self.buffers) + 1}"
         self.buffers.append((pointer, name, input_cb, input_data, close_cb, close_data))
+        self.buffer_strings[pointer] = {
+            "name": name,
+            "full_name": "python." + name,
+        }
         return pointer
 
     def buffer_set(self, buffer, property_name, value):
         self.buffer_properties.append((buffer, property_name, value))
         if property_name == "input":
             self.buffer_inputs[buffer] = value
+        if property_name in {"short_name", "title"}:
+            self.buffer_strings.setdefault(buffer, {})[property_name] = value
+        if property_name.startswith("localvar_set_"):
+            name = "localvar_" + property_name.removeprefix("localvar_set_")
+            self.buffer_strings.setdefault(buffer, {})[name] = value
 
     def buffer_get_string(self, buffer, property_name):
         if property_name == "input":
             return self.buffer_inputs.get(buffer, "")
-        return ""
+        return self.buffer_strings.get(buffer, {}).get(property_name, "")
 
     def command(self, buffer, command):
         self.commands.append((buffer, command))
@@ -116,6 +129,26 @@ class FakeWeechat:
 
     def hook_set(self, hook, property_name, value):
         self.hook_sets.append((hook, property_name, value))
+
+    def infolist_get(self, name, _pointer, _args):
+        if name != "buffer":
+            return ""
+        self.infolist_index = -1
+        return "infolist:buffer"
+
+    def infolist_next(self, infolist):
+        if infolist != "infolist:buffer":
+            return False
+        self.infolist_index += 1
+        return self.infolist_index < len(self.infolist_items)
+
+    def infolist_pointer(self, infolist, name):
+        if infolist != "infolist:buffer" or name != "pointer":
+            return ""
+        return self.infolist_items[self.infolist_index]
+
+    def infolist_free(self, infolist):
+        self.freed_infolists.append(infolist)
 
 
 @pytest.fixture
@@ -375,8 +408,13 @@ def test_inspect_navigation_moves_cursor_before_enter(fresh_meechat):
 
     meechat.command_cb("", "buffer", "inspect-cancel")
 
-    assert fake.line_data["line-data-1"]["prefix"].startswith("<reverse>>> ")
-    assert fake.line_data["line-data-1"]["message"] == "<reverse>first<reset>"
+    assert fake.line_data["line-data-1"] == {
+        "prefix": "<red>Alice<reset>",
+        "message": "first",
+    }
+    rendered = meechat.inspect_bar_item_cb("", "", "", "buffer", {})
+    assert "enter: select message" in rendered
+    assert "actions:" not in rendered
 
 
 def test_inspect_enter_menu_completes_edit_action(monkeypatch, fresh_meechat):
@@ -498,14 +536,42 @@ def test_room_buffer_binds_inspect_navigation_and_creates_top_monitor(fresh_meec
         "key_bind_ctrl-M",
         "/meechat inspect-enter",
     ) in fake.buffer_properties
-    assert (
-        "buffer",
-        "key_bind_ctrl-G",
-        "/meechat inspect-cancel",
-    ) in fake.buffer_properties
+    for key in meechat.INSPECT_CANCEL_KEYS:
+        assert (
+            "buffer",
+            "key_bind_" + key,
+            "/meechat inspect-cancel",
+        ) in fake.buffer_properties
     assert fake.bars[0][0] == "meechat_inspect"
     assert fake.bars[0][5] == "top"
     assert fake.bars[1][0] == "meechat_topic"
     assert fake.bars[1][5] == "top"
     assert fake.bars[1][12] == "darkblue"
     assert fake.bars[1][15] == "buffer_title"
+
+
+def test_startup_rehydrates_existing_room_buffers(fresh_meechat):
+    fake = fresh_meechat
+    fake.infolist_items = ["buffer"]
+    fake.buffer_strings["buffer"] = {
+        "name": "meechat._room_example.org",
+        "full_name": "python.meechat._room_example.org",
+        "localvar_room_id": "!room:example.org",
+        "short_name": "Test Room",
+        "title": "Room topic",
+    }
+
+    meechat._rehydrate_room_buffers()
+
+    assert meechat.ROOM_BUFFERS["!room:example.org"] == "buffer"
+    assert meechat.BUFFER_ROOMS["buffer"] == "!room:example.org"
+    assert meechat.ROOM_NAMES["!room:example.org"] == "Test Room"
+    assert meechat.ROOM_TOPICS["!room:example.org"] == "Room topic"
+    assert ("buffer", "localvar_set_meechat", "1") in fake.buffer_properties
+    for key in meechat.INSPECT_CANCEL_KEYS:
+        assert (
+            "buffer",
+            "key_bind_" + key,
+            "/meechat inspect-cancel",
+        ) in fake.buffer_properties
+    assert fake.freed_infolists == ["infolist:buffer"]
