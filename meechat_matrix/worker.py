@@ -20,47 +20,13 @@ if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from meechat_matrix import __version__
-from meechat_matrix.protocol import ProtocolError, dumps, loads
-
-
-def _redacted_text(value: Any) -> str:
-    text = str(value or "")
-    if not text:
-        return "<empty>"
-    if len(text) <= 8:
-        return "<set>"
-    return text[:4] + "..." + text[-4:]
-
-
-def _message_summary(message: dict[str, Any]) -> str:
-    message_type = str(message.get("type") or "")
-    parts = [f"type={message_type}"]
-    for key in (
-        "auth",
-        "where",
-        "room_id",
-        "room",
-        "event_id",
-        "user_id",
-        "first",
-        "member_count",
-        "encrypted",
-    ):
-        if key in message:
-            parts.append(f"{key}={_summary_value(key, message[key])}")
-    if "receipts" in message:
-        parts.append(f"receipts={len(message.get('receipts') or [])}")
-    if "body" in message:
-        parts.append(f"body_len={len(str(message.get('body') or ''))}")
-    if "message" in message:
-        parts.append(f"message={message.get('message', '')}")
-    return " ".join(parts)
-
-
-def _summary_value(key: str, value: Any) -> str:
-    if key in {"room_id", "room", "event_id", "user_id"}:
-        return _redacted_text(value)
-    return str(value)
+from meechat_matrix.protocol import (
+    ProtocolError,
+    dumps,
+    loads,
+    message_summary as _message_summary,
+    redacted_text as _redacted_text,
+)
 
 
 @dataclass(slots=True)
@@ -109,21 +75,18 @@ class WorkerConfig:
         if missing:
             raise ProtocolError("missing config field(s): " + ", ".join(missing))
 
-        try:
-            sync_timeout_ms = int(message.get("sync_timeout_ms") or 30000)
-        except (TypeError, ValueError) as exc:
-            raise ProtocolError("sync_timeout_ms must be an integer") from exc
-
-        if sync_timeout_ms < 1000:
-            raise ProtocolError("sync_timeout_ms must be at least 1000")
-
-        try:
-            backlog_limit = int(message.get("backlog_limit") or 100)
-        except (TypeError, ValueError) as exc:
-            raise ProtocolError("backlog_limit must be an integer") from exc
-
-        if backlog_limit < 1:
-            raise ProtocolError("backlog_limit must be at least 1")
+        sync_timeout_ms = _positive_int_config(
+            message,
+            "sync_timeout_ms",
+            default=30000,
+            minimum=1000,
+        )
+        backlog_limit = _positive_int_config(
+            message,
+            "backlog_limit",
+            default=100,
+            minimum=1,
+        )
 
         return cls(
             auth=auth,
@@ -141,6 +104,23 @@ class WorkerConfig:
     @property
     def use_password_login(self) -> bool:
         return self.auth == "password" or (self.auth == "auto" and bool(self.password))
+
+
+def _positive_int_config(
+    message: dict[str, Any],
+    name: str,
+    *,
+    default: int,
+    minimum: int,
+) -> int:
+    try:
+        value = int(message.get(name) or default)
+    except (TypeError, ValueError) as exc:
+        raise ProtocolError(f"{name} must be an integer") from exc
+
+    if value < minimum:
+        raise ProtocolError(f"{name} must be at least {minimum}")
+    return value
 
 
 class MatrixWorker:

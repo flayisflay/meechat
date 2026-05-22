@@ -25,7 +25,13 @@ SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
-from meechat_matrix.protocol import ProtocolError, dumps, loads
+from meechat_matrix.protocol import (
+    ProtocolError,
+    dumps,
+    loads,
+    message_summary,
+    redacted_text as _redacted_text,
+)
 
 try:
     import weechat
@@ -33,37 +39,23 @@ except ImportError:  # Allows syntax/import checks outside WeeChat.
     weechat = None  # type: ignore
 
 
-DEFAULT_OPTIONS = {
-    "auth": "auto",
-    "homeserver": "",
-    "user_id": "",
-    "username": "",
-    "access_token": "",
-    "password": "",
-    "device_id": "",
-    "store_path": "",
-    "sync_timeout_ms": "30000",
-    "backlog_limit": "100",
-    "python": "python3",
-    "autoconnect": "off",
-    "debug": "off",
-}
-
-OPTION_DESCRIPTIONS = {
-    "auth": "Authentication mode: auto, token, or password",
-    "homeserver": "Matrix homeserver URL, for example https://matrix.org",
-    "user_id": "Full Matrix user ID, for example @alice:matrix.org",
-    "username": "Matrix login username, localpart, email, or full user ID",
-    "access_token": "Access token, preferably ${sec.data.meechat_access_token}",
-    "password": "Matrix password, preferably ${sec.data.meechat_password}",
-    "device_id": "Matrix device ID associated with the access token",
-    "store_path": "matrix-nio store directory; empty uses WeeChat config dir",
-    "sync_timeout_ms": "Matrix sync long-poll timeout in milliseconds",
-    "backlog_limit": "Recent Matrix room messages requested on initial sync",
-    "python": "Python executable used to start the Matrix worker",
-    "autoconnect": "Connect when the script loads: on/off",
-    "debug": "Pass --debug to the worker for exception tracebacks: on/off",
-}
+OPTION_SPECS = (
+    ("auth", "auto", "Authentication mode: auto, token, or password"),
+    ("homeserver", "", "Matrix homeserver URL, for example https://matrix.org"),
+    ("user_id", "", "Full Matrix user ID, for example @alice:matrix.org"),
+    ("username", "", "Matrix login username, localpart, email, or full user ID"),
+    ("access_token", "", "Access token, preferably ${sec.data.meechat_access_token}"),
+    ("password", "", "Matrix password, preferably ${sec.data.meechat_password}"),
+    ("device_id", "", "Matrix device ID associated with the access token"),
+    ("store_path", "", "matrix-nio store directory; empty uses WeeChat config dir"),
+    ("sync_timeout_ms", "30000", "Matrix sync long-poll timeout in milliseconds"),
+    ("backlog_limit", "100", "Recent Matrix room messages requested on initial sync"),
+    ("python", "python3", "Python executable used to start the Matrix worker"),
+    ("autoconnect", "off", "Connect when the script loads: on/off"),
+    ("debug", "off", "Pass --debug to the worker for exception tracebacks: on/off"),
+)
+DEFAULT_OPTIONS = {name: default for name, default, _description in OPTION_SPECS}
+OPTION_DESCRIPTIONS = {name: description for name, _default, description in OPTION_SPECS}
 
 WORKER_HOOK = ""
 WORKER_STDOUT = ""
@@ -96,43 +88,30 @@ INSPECT_MODE_KEYS = {
     "ctrl-M": "/meechat inspect-enter",
     **{key: "/meechat inspect-cancel" for key in INSPECT_CANCEL_KEYS},
 }
+
+
+def _inspect_action(
+    key: str,
+    name: str,
+    label: str,
+    prompt: str = "",
+    seed: str = "",
+) -> dict[str, str]:
+    action = {"key": key, "name": name, "label": label}
+    if prompt:
+        action["prompt"] = prompt
+    if seed:
+        action["seed"] = seed
+    return action
+
+
 INSPECT_ACTIONS = [
-    {
-        "key": "r",
-        "name": "reply",
-        "label": "[r]eply",
-        "prompt": "reply text",
-    },
-    {
-        "key": "t",
-        "name": "thread",
-        "label": "reply in [t]hread",
-        "prompt": "thread reply text",
-    },
-    {
-        "key": "e",
-        "name": "edit",
-        "label": "[e]dit",
-        "prompt": "replacement text",
-        "seed": "body",
-    },
-    {
-        "key": "a",
-        "name": "reaction",
-        "label": "[a]dd reaction",
-        "prompt": "reaction",
-    },
-    {
-        "key": "v",
-        "name": "remove",
-        "label": "remo[v]e",
-        "prompt": "redaction reason (optional)",
-    },
-    {
-        "key": "p",
-        "name": "permalink",
-        "label": "[p]ermalink",
-    },
+    _inspect_action("r", "reply", "[r]eply", "reply text"),
+    _inspect_action("t", "thread", "reply in [t]hread", "thread reply text"),
+    _inspect_action("e", "edit", "[e]dit", "replacement text", "body"),
+    _inspect_action("a", "reaction", "[a]dd reaction", "reaction"),
+    _inspect_action("v", "remove", "remo[v]e", "redaction reason (optional)"),
+    _inspect_action("p", "permalink", "[p]ermalink"),
 ]
 
 
@@ -154,46 +133,23 @@ def _log(message: str) -> None:
     weechat.prnt("", "meechat: " + message)
 
 
-def _redacted_text(value: Any) -> str:
-    text = str(value or "")
-    if not text:
-        return "<empty>"
-    if len(text) <= 8:
-        return "<set>"
-    return text[:4] + "..." + text[-4:]
-
-
 def _protocol_summary(message: dict[str, Any]) -> str:
-    message_type = str(message.get("type") or "")
-    parts = [f"type={message_type}"]
-    for key in (
-        "auth",
-        "action",
-        "where",
-        "room_id",
-        "room",
-        "event_id",
-        "user_id",
-        "name",
-        "first",
-        "member_count",
-        "encrypted",
-    ):
-        if key in message:
-            parts.append(f"{key}={_summary_value(key, message[key])}")
-    if "receipts" in message:
-        parts.append(f"receipts={len(message.get('receipts') or [])}")
-    if "body" in message:
-        parts.append(f"body_len={len(str(message.get('body') or ''))}")
-    if "message" in message:
-        parts.append(f"message={message.get('message', '')}")
-    return " ".join(parts)
-
-
-def _summary_value(key: str, value: Any) -> str:
-    if key in {"room_id", "event_id", "user_id", "room"}:
-        return _redacted_text(value)
-    return str(value)
+    return message_summary(
+        message,
+        keys=(
+            "auth",
+            "action",
+            "where",
+            "room_id",
+            "room",
+            "event_id",
+            "user_id",
+            "name",
+            "first",
+            "member_count",
+            "encrypted",
+        ),
+    )
 
 
 def _redacted_protocol_line(line: str) -> str:
@@ -1739,10 +1695,6 @@ def _update_message_line(message: dict[str, Any], *, selected: bool) -> bool:
     return bool(updated)
 
 
-def _last_printed_line_data(buffer: str) -> str:
-    return _last_printed_line_refs(buffer)[1]
-
-
 def _last_printed_line_refs(buffer: str) -> tuple[str, str]:
     for name in ("own_lines", "lines"):
         line, line_data = _last_printed_line_refs_from_lines(buffer, name)
@@ -1791,43 +1743,23 @@ def _last_printed_line_refs_from_lines(
 def _ensure_inspect_bar() -> None:
     global INSPECT_BAR, INSPECT_BAR_ITEM
 
-    if not INSPECT_BAR_ITEM:
-        _log("creating inspect bar item")
-        INSPECT_BAR_ITEM = weechat.bar_item_new(
-            "(extra)meechat_inspect",
-            "inspect_bar_item_cb",
-            "",
-        )
-        _log(f"inspect bar item result: item={INSPECT_BAR_ITEM}")
-    else:
-        _log(f"inspect bar item already exists: item={INSPECT_BAR_ITEM}")
+    INSPECT_BAR_ITEM = _ensure_bar_item(
+        INSPECT_BAR_ITEM,
+        "inspect",
+        "(extra)meechat_inspect",
+        "inspect_bar_item_cb",
+    )
 
     if not INSPECT_BAR:
-        _remove_existing_bar("meechat_inspect")
-        _log("creating inspect bar")
-        INSPECT_BAR = weechat.bar_new(
-            "meechat_inspect",
-            "off",
-            "100",
-            "window",
-            "${buffer.local_variables.meechat_inspect} == 1",
-            "top",
-            "vertical",
-            "vertical",
-            "0",
-            "9",
-            "default",
-            "default",
-            "default",
-            "default",
-            "on",
-            "meechat_inspect",
+        INSPECT_BAR = _create_top_bar(
+            kind="inspect",
+            name="meechat_inspect",
+            priority="100",
+            condition="${buffer.local_variables.meechat_inspect} == 1",
+            filling="vertical",
+            size="9",
+            color_bg="default",
         )
-        if not INSPECT_BAR:
-            weechat.prnt("", "meechat: failed to create inspect bar")
-            _log("inspect bar creation failed")
-        else:
-            _log(f"inspect bar created: bar={INSPECT_BAR}")
     else:
         _log(f"inspect bar already exists: bar={INSPECT_BAR}")
 
@@ -1837,46 +1769,80 @@ def _ensure_inspect_bar() -> None:
 def _ensure_topic_bar() -> None:
     global TOPIC_BAR, TOPIC_BAR_ITEM
 
-    if not TOPIC_BAR_ITEM:
-        _log("creating topic bar item")
-        TOPIC_BAR_ITEM = weechat.bar_item_new(
-            "(extra)meechat_topic",
-            "topic_bar_item_cb",
-            "",
-        )
-        _log(f"topic bar item result: item={TOPIC_BAR_ITEM}")
-    else:
-        _log(f"topic bar item already exists: item={TOPIC_BAR_ITEM}")
+    TOPIC_BAR_ITEM = _ensure_bar_item(
+        TOPIC_BAR_ITEM,
+        "topic",
+        "(extra)meechat_topic",
+        "topic_bar_item_cb",
+    )
 
     if TOPIC_BAR:
         _log(f"topic bar already exists: bar={TOPIC_BAR}")
         return
 
-    _remove_existing_bar("meechat_topic")
-    _log("creating topic bar")
-    TOPIC_BAR = weechat.bar_new(
-        "meechat_topic",
+    TOPIC_BAR = _create_top_bar(
+        kind="topic",
+        name="meechat_topic",
+        priority="99",
+        condition="${buffer.local_variables.type} == matrix",
+        filling="horizontal",
+        size="1",
+        color_bg="darkblue",
+    )
+
+
+def _ensure_bar_item(
+    item_pointer: str,
+    kind: str,
+    name: str,
+    callback: str,
+) -> str:
+    if item_pointer:
+        _log(f"{kind} bar item already exists: item={item_pointer}")
+        return item_pointer
+
+    _log(f"creating {kind} bar item")
+    item_pointer = weechat.bar_item_new(name, callback, "")
+    _log(f"{kind} bar item result: item={item_pointer}")
+    return item_pointer
+
+
+def _create_top_bar(
+    *,
+    kind: str,
+    name: str,
+    priority: str,
+    condition: str,
+    filling: str,
+    size: str,
+    color_bg: str,
+) -> str:
+    _remove_existing_bar(name)
+    _log(f"creating {kind} bar")
+    bar = weechat.bar_new(
+        name,
         "off",
-        "99",
+        priority,
         "window",
-        "${buffer.local_variables.type} == matrix",
+        condition,
         "top",
-        "horizontal",
+        filling,
         "vertical",
         "0",
-        "1",
+        size,
         "default",
         "default",
-        "darkblue",
+        color_bg,
         "default",
         "on",
-        "meechat_topic",
+        name,
     )
-    if not TOPIC_BAR:
-        weechat.prnt("", "meechat: failed to create topic bar")
-        _log("topic bar creation failed")
+    if not bar:
+        weechat.prnt("", f"meechat: failed to create {kind} bar")
+        _log(f"{kind} bar creation failed")
     else:
-        _log(f"topic bar created: bar={TOPIC_BAR}")
+        _log(f"{kind} bar created: bar={bar}")
+    return bar
 
 
 def _remove_existing_bar(name: str) -> None:
@@ -2111,30 +2077,34 @@ def _single_line_body(body: str) -> str:
 def _remove_inspect_bar() -> None:
     global INSPECT_BAR, INSPECT_BAR_ITEM, TOPIC_BAR, TOPIC_BAR_ITEM
 
-    if INSPECT_BAR:
-        _log(f"removing inspect bar: bar={INSPECT_BAR}")
-        weechat.bar_remove(INSPECT_BAR)
-        INSPECT_BAR = ""
-    else:
-        _log("inspect bar removal skipped; no inspect bar")
-    if TOPIC_BAR:
-        _log(f"removing topic bar: bar={TOPIC_BAR}")
-        weechat.bar_remove(TOPIC_BAR)
-        TOPIC_BAR = ""
-    else:
-        _log("topic bar removal skipped; no topic bar")
-    if TOPIC_BAR_ITEM:
-        _log(f"removing topic bar item: item={TOPIC_BAR_ITEM}")
-        weechat.bar_item_remove(TOPIC_BAR_ITEM)
-        TOPIC_BAR_ITEM = ""
-    else:
-        _log("topic bar item removal skipped; no item")
-    if INSPECT_BAR_ITEM:
-        _log(f"removing inspect bar item: item={INSPECT_BAR_ITEM}")
-        weechat.bar_item_remove(INSPECT_BAR_ITEM)
-        INSPECT_BAR_ITEM = ""
-    else:
-        _log("inspect bar item removal skipped; no item")
+    INSPECT_BAR = _remove_weechat_object(
+        INSPECT_BAR, "inspect bar", weechat.bar_remove, "bar", "no inspect bar"
+    )
+    TOPIC_BAR = _remove_weechat_object(
+        TOPIC_BAR, "topic bar", weechat.bar_remove, "bar", "no topic bar"
+    )
+    TOPIC_BAR_ITEM = _remove_weechat_object(
+        TOPIC_BAR_ITEM, "topic bar item", weechat.bar_item_remove, "item", "no item"
+    )
+    INSPECT_BAR_ITEM = _remove_weechat_object(
+        INSPECT_BAR_ITEM, "inspect bar item", weechat.bar_item_remove, "item", "no item"
+    )
+
+
+def _remove_weechat_object(
+    pointer: str,
+    label: str,
+    remover: Any,
+    pointer_name: str,
+    missing: str,
+) -> str:
+    if not pointer:
+        _log(f"{label} removal skipped; {missing}")
+        return ""
+
+    _log(f"removing {label}: {pointer_name}={pointer}")
+    remover(pointer)
+    return ""
 
 
 def _format_inspect_time(timestamp: int) -> str:
@@ -2260,6 +2230,51 @@ def script_unload_cb() -> int:
     return weechat.WEECHAT_RC_OK
 
 
+def _join_command(buffer: str, argv: list[str]) -> None:
+    if len(argv) < 2:
+        _log("join command rejected; missing room argument")
+        weechat.prnt(buffer, "usage: /meechat join <room-id-or-alias>")
+    else:
+        _log(f"join command sending room={_redacted_text(argv[1])}")
+        _send_to_worker({"type": "join", "room": argv[1]})
+
+
+def _leave_command(buffer: str, argv: list[str]) -> None:
+    room_id = argv[1] if len(argv) > 1 else BUFFER_ROOMS.get(buffer, "")
+    if not room_id:
+        _log("leave command rejected; no room id argument or buffer mapping")
+        weechat.prnt(buffer, "usage: /meechat leave <room-id>")
+    else:
+        _log(f"leave command sending room_id={_redacted_text(room_id)}")
+        _send_to_worker({"type": "leave", "room_id": room_id})
+
+
+def _set_command(buffer: str, args: str, argv: list[str]) -> None:
+    if len(argv) < 3:
+        _log("set command rejected; missing option or value")
+        weechat.prnt(buffer, "usage: /meechat set <option> <value>")
+        return
+
+    name = argv[1]
+    if name not in DEFAULT_OPTIONS:
+        _log(f"set command rejected; unknown option={name}")
+        weechat.prnt(buffer, f"meechat: unknown option {name}")
+        return
+
+    weechat.config_set_plugin(name, args.split(None, 2)[2])
+    weechat.prnt(buffer, f"meechat: set {name}")
+    _log(
+        "set command applied: "
+        f"option={name} value={_option_value_summary(name, argv[2])}"
+    )
+
+
+def _status_command(buffer: str) -> None:
+    status = "running" if WORKER_HOOK else "stopped"
+    weechat.prnt(buffer, f"meechat: worker {status}")
+    _log(f"status command reported worker={status} hook={WORKER_HOOK}")
+
+
 def command_cb(data: str, buffer: str, args: str) -> int:
     argv = args.strip().split()
     subcommand = argv[0].lower() if argv else "help"
@@ -2269,54 +2284,29 @@ def command_cb(data: str, buffer: str, args: str) -> int:
         f"args={_command_summary(args)!r}"
     )
 
-    if subcommand == "connect":
-        _log("command dispatch: connect")
-        _connect()
+    simple_commands = {
+        "connect": _connect,
+        "disconnect": _disconnect,
+        "inspect": lambda: _show_inspect(buffer),
+        "inspect-cancel": lambda: _inspect_cancel(buffer),
+        "inspect-enter": lambda: _inspect_enter(buffer),
+        "inspect-toggle": lambda: _toggle_inspect_mode(buffer),
+        "rooms": lambda: _send_to_worker({"type": "rooms"}),
+    }
+    if subcommand in simple_commands:
+        _log(f"command dispatch: {subcommand}")
+        simple_commands[subcommand]()
         return weechat.WEECHAT_RC_OK
 
-    if subcommand == "disconnect":
-        _log("command dispatch: disconnect")
-        _disconnect()
-        return weechat.WEECHAT_RC_OK
-
-    if subcommand == "rooms":
-        _log("command dispatch: rooms")
-        _send_to_worker({"type": "rooms"})
-        return weechat.WEECHAT_RC_OK
-
-    if subcommand == "inspect":
-        _log("command dispatch: inspect")
-        _show_inspect(buffer)
-        return weechat.WEECHAT_RC_OK
-
-    if subcommand == "inspect-toggle":
-        _log("command dispatch: inspect-toggle")
-        _toggle_inspect_mode(buffer)
-        return weechat.WEECHAT_RC_OK
-
-    if subcommand == "inspect-prev":
-        _log("command dispatch: inspect-prev")
-        _inspect_key_step(buffer, -1)
-        return weechat.WEECHAT_RC_OK
-
-    if subcommand == "inspect-next":
-        _log("command dispatch: inspect-next")
-        _inspect_key_step(buffer, 1)
-        return weechat.WEECHAT_RC_OK
-
-    if subcommand == "inspect-up":
-        _log("command dispatch: inspect-up")
-        _inspect_key_step(buffer, -1)
-        return weechat.WEECHAT_RC_OK
-
-    if subcommand == "inspect-down":
-        _log("command dispatch: inspect-down")
-        _inspect_key_step(buffer, 1)
-        return weechat.WEECHAT_RC_OK
-
-    if subcommand == "inspect-enter":
-        _log("command dispatch: inspect-enter")
-        _inspect_enter(buffer)
+    inspect_steps = {
+        "inspect-prev": -1,
+        "inspect-next": 1,
+        "inspect-up": -1,
+        "inspect-down": 1,
+    }
+    if subcommand in inspect_steps:
+        _log(f"command dispatch: {subcommand}")
+        _inspect_key_step(buffer, inspect_steps[subcommand])
         return weechat.WEECHAT_RC_OK
 
     if subcommand == "inspect-action":
@@ -2327,52 +2317,15 @@ def command_cb(data: str, buffer: str, args: str) -> int:
             _log("inspect-action command ignored; missing key argument")
         return weechat.WEECHAT_RC_OK
 
-    if subcommand == "inspect-cancel":
-        _log("command dispatch: inspect-cancel")
-        _inspect_cancel(buffer)
-        return weechat.WEECHAT_RC_OK
-
-    if subcommand == "join":
-        if len(argv) < 2:
-            _log("join command rejected; missing room argument")
-            weechat.prnt(buffer, "usage: /meechat join <room-id-or-alias>")
-        else:
-            _log(f"join command sending room={_redacted_text(argv[1])}")
-            _send_to_worker({"type": "join", "room": argv[1]})
-        return weechat.WEECHAT_RC_OK
-
-    if subcommand in {"part", "leave"}:
-        room_id = argv[1] if len(argv) > 1 else BUFFER_ROOMS.get(buffer, "")
-        if not room_id:
-            _log("leave command rejected; no room id argument or buffer mapping")
-            weechat.prnt(buffer, "usage: /meechat leave <room-id>")
-        else:
-            _log(f"leave command sending room_id={_redacted_text(room_id)}")
-            _send_to_worker({"type": "leave", "room_id": room_id})
-        return weechat.WEECHAT_RC_OK
-
-    if subcommand == "set":
-        if len(argv) < 3:
-            _log("set command rejected; missing option or value")
-            weechat.prnt(buffer, "usage: /meechat set <option> <value>")
-        else:
-            name = argv[1]
-            if name not in DEFAULT_OPTIONS:
-                _log(f"set command rejected; unknown option={name}")
-                weechat.prnt(buffer, f"meechat: unknown option {name}")
-            else:
-                weechat.config_set_plugin(name, args.split(None, 2)[2])
-                weechat.prnt(buffer, f"meechat: set {name}")
-                _log(
-                    "set command applied: "
-                    f"option={name} value={_option_value_summary(name, argv[2])}"
-                )
-        return weechat.WEECHAT_RC_OK
-
-    if subcommand == "status":
-        status = "running" if WORKER_HOOK else "stopped"
-        weechat.prnt(buffer, f"meechat: worker {status}")
-        _log(f"status command reported worker={status} hook={WORKER_HOOK}")
+    argument_commands = {
+        "join": lambda: _join_command(buffer, argv),
+        "leave": lambda: _leave_command(buffer, argv),
+        "part": lambda: _leave_command(buffer, argv),
+        "set": lambda: _set_command(buffer, args, argv),
+        "status": lambda: _status_command(buffer),
+    }
+    if subcommand in argument_commands:
+        argument_commands[subcommand]()
         return weechat.WEECHAT_RC_OK
 
     _log(f"unknown or help command; printing help for subcommand={subcommand}")

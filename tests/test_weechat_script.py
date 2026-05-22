@@ -227,6 +227,31 @@ def fresh_meechat(monkeypatch):
     return fake
 
 
+def print_message(
+    *,
+    room_id="!room:example",
+    room_name="General",
+    sender="@alice:example",
+    sender_display_name="Alice",
+    body="hello",
+    event_id="$event",
+    server_timestamp=123000,
+    **extra,
+):
+    message = {
+        "room_id": room_id,
+        "room_name": room_name,
+        "sender": sender,
+        "sender_display_name": sender_display_name,
+        "body": body,
+        "server_timestamp": server_timestamp,
+        **extra,
+    }
+    if event_id is not None:
+        message["event_id"] = event_id
+    meechat._print_matrix_message(message)
+
+
 def test_start_worker_flushes_process_output_immediately(monkeypatch):
     fake = FakeWeechat()
     monkeypatch.setattr(meechat, "weechat", fake)
@@ -279,17 +304,7 @@ def test_command_summary_redacts_secret_set_commands():
 
 def test_print_matrix_message_uses_colored_display_name(fresh_meechat):
     fake = fresh_meechat
-    meechat._print_matrix_message(
-        {
-            "room_id": "!room:example",
-            "room_name": "General",
-            "room_topic": "Only the topic",
-            "sender": "@alice:example",
-            "sender_display_name": "Alice",
-            "body": "hello",
-            "server_timestamp": 123000,
-        }
-    )
+    print_message(event_id=None, room_topic="Only the topic")
 
     assert fake.printed_lines == [
         (
@@ -329,16 +344,12 @@ def test_inspect_monitor_steps_through_room_messages(fresh_meechat):
         ("$one", "Alice", "first", 123000),
         ("$two", "Bob", "second", 124000),
     ):
-        meechat._print_matrix_message(
-            {
-                "room_id": "!room:example",
-                "room_name": "General",
-                "sender": f"@{sender.lower()}:example",
-                "sender_display_name": sender,
-                "body": body,
-                "event_id": event_id,
-                "server_timestamp": timestamp,
-            }
+        print_message(
+            event_id=event_id,
+            sender=f"@{sender.lower()}:example",
+            sender_display_name=sender,
+            body=body,
+            server_timestamp=timestamp,
         )
 
     meechat.command_cb("", "buffer", "inspect")
@@ -387,17 +398,7 @@ def test_inspect_monitor_steps_through_room_messages(fresh_meechat):
 def test_inspect_monitor_shows_colored_read_receipts(fresh_meechat):
     fake = fresh_meechat
     for event_id, body in (("$one", "first"), ("$two", "second")):
-        meechat._print_matrix_message(
-            {
-                "room_id": "!room:example",
-                "room_name": "General",
-                "sender": "@alice:example",
-                "sender_display_name": "Alice",
-                "body": body,
-                "event_id": event_id,
-                "server_timestamp": 123000,
-            }
-        )
+        print_message(event_id=event_id, body=body)
 
     meechat._record_read_receipts(
         {
@@ -432,17 +433,7 @@ def test_inspect_monitor_shows_colored_read_receipts(fresh_meechat):
 
 def test_inspect_monitor_shows_reactions_with_counts_and_senders(fresh_meechat):
     for event_id, body in (("$one", "first"), ("$two", "second")):
-        meechat._print_matrix_message(
-            {
-                "room_id": "!room:example",
-                "room_name": "General",
-                "sender": "@alice:example",
-                "sender_display_name": "Alice",
-                "body": body,
-                "event_id": event_id,
-                "server_timestamp": 123000,
-            }
-        )
+        print_message(event_id=event_id, body=body)
 
     for event_id, key, sender, display_name, timestamp in (
         ("$react1", "👍", "@beatrice:example", "Beatrice", 124000),
@@ -481,16 +472,11 @@ def test_inspect_navigation_moves_cursor_before_enter(fresh_meechat):
         ("$one", "Alice", "first"),
         ("$two", "Bob", "second"),
     ):
-        meechat._print_matrix_message(
-            {
-                "room_id": "!room:example",
-                "room_name": "General",
-                "sender": f"@{sender.lower()}:example",
-                "sender_display_name": sender,
-                "body": body,
-                "event_id": event_id,
-                "server_timestamp": 123000,
-            }
+        print_message(
+            event_id=event_id,
+            sender=f"@{sender.lower()}:example",
+            sender_display_name=sender,
+            body=body,
         )
 
     assert fake.line_updates == []
@@ -534,17 +520,7 @@ def test_inspect_navigation_moves_cursor_before_enter(fresh_meechat):
 def test_inspect_navigation_scrolls_only_when_selection_leaves_view(fresh_meechat):
     fake = fresh_meechat
     for index in range(1, 7):
-        meechat._print_matrix_message(
-            {
-                "room_id": "!room:example",
-                "room_name": "General",
-                "sender": "@alice:example",
-                "sender_display_name": "Alice",
-                "body": f"message {index}",
-                "event_id": f"${index}",
-                "server_timestamp": 123000,
-            }
-        )
+        print_message(body=f"message {index}", event_id=f"${index}")
 
     meechat.command_cb("", "buffer", "inspect")
 
@@ -584,17 +560,7 @@ def test_inspect_navigation_requests_backfill_at_oldest_message(
     fake = fresh_meechat
     monkeypatch.setattr(meechat, "WORKER_HOOK", "worker-hook")
     for event_id, body in (("$one", "first"), ("$two", "second")):
-        meechat._print_matrix_message(
-            {
-                "room_id": "!room:example",
-                "room_name": "General",
-                "sender": "@alice:example",
-                "sender_display_name": "Alice",
-                "body": body,
-                "event_id": event_id,
-                "server_timestamp": 123000,
-            }
-        )
+        print_message(event_id=event_id, body=body)
 
     meechat.command_cb("", "buffer", "inspect")
     meechat.command_cb("", "buffer", "inspect-prev")
@@ -620,17 +586,7 @@ def test_backfill_prepends_history_and_selects_next_older_message(
     fake = fresh_meechat
     monkeypatch.setattr(meechat, "WORKER_HOOK", "worker-hook")
     for event_id, body in (("$one", "first"), ("$two", "second")):
-        meechat._print_matrix_message(
-            {
-                "room_id": "!room:example",
-                "room_name": "General",
-                "sender": "@alice:example",
-                "sender_display_name": "Alice",
-                "body": body,
-                "event_id": event_id,
-                "server_timestamp": 123000,
-            }
-        )
+        print_message(event_id=event_id, body=body)
 
     meechat.command_cb("", "buffer", "inspect")
     meechat.command_cb("", "buffer", "inspect-prev")
@@ -682,17 +638,7 @@ def test_backfill_prepends_history_and_selects_next_older_message(
 
 def test_ctrl_g_toggles_monitor_and_selector(fresh_meechat):
     fake = fresh_meechat
-    meechat._print_matrix_message(
-        {
-            "room_id": "!room:example",
-            "room_name": "General",
-            "sender": "@alice:example",
-            "sender_display_name": "Alice",
-            "body": "hello",
-            "event_id": "$event",
-            "server_timestamp": 123000,
-        }
-    )
+    print_message()
 
     assert meechat.inspect_bar_item_cb("", "", "", "buffer", {}) == ""
     assert meechat.INSPECT_ACTIVE_ROOMS == set()
@@ -730,17 +676,7 @@ def test_ctrl_g_toggles_monitor_and_selector(fresh_meechat):
 
 def test_inspect_keys_delegate_in_normal_mode(fresh_meechat):
     fake = fresh_meechat
-    meechat._print_matrix_message(
-        {
-            "room_id": "!room:example",
-            "room_name": "General",
-            "sender": "@alice:example",
-            "sender_display_name": "Alice",
-            "body": "hello",
-            "event_id": "$event",
-            "server_timestamp": 123000,
-        }
-    )
+    print_message()
 
     meechat.command_cb("", "buffer", "inspect-up")
     meechat.command_cb("", "buffer", "inspect-prev")
@@ -759,17 +695,7 @@ def test_inspect_enter_menu_completes_edit_action(monkeypatch, fresh_meechat):
     fake = fresh_meechat
     monkeypatch.setattr(meechat, "WORKER_HOOK", "worker-hook")
     for event_id, body in (("$one", "first"), ("$two", "second")):
-        meechat._print_matrix_message(
-            {
-                "room_id": "!room:example",
-                "room_name": "General",
-                "sender": "@alice:example",
-                "sender_display_name": "Alice",
-                "body": body,
-                "event_id": event_id,
-                "server_timestamp": 123000,
-            }
-        )
+        print_message(event_id=event_id, body=body)
 
     meechat.command_cb("", "buffer", "inspect")
     meechat.command_cb("", "buffer", "inspect-enter")
@@ -814,17 +740,7 @@ def test_inspect_enter_menu_completes_edit_action(monkeypatch, fresh_meechat):
 
 def test_inspect_action_menu_uses_arrow_selection(fresh_meechat):
     fake = fresh_meechat
-    meechat._print_matrix_message(
-        {
-            "room_id": "!room:example",
-            "room_name": "General",
-            "sender": "@alice:example",
-            "sender_display_name": "Alice",
-            "body": "hello",
-            "event_id": "$event",
-            "server_timestamp": 123000,
-        }
-    )
+    print_message()
 
     meechat.command_cb("", "buffer", "inspect")
     meechat.command_cb("", "buffer", "inspect-enter")
@@ -839,17 +755,7 @@ def test_inspect_action_menu_uses_arrow_selection(fresh_meechat):
 
 def test_room_buffer_binds_inspect_navigation_and_creates_top_monitor(fresh_meechat):
     fake = fresh_meechat
-    meechat._print_matrix_message(
-        {
-            "room_id": "!room:example",
-            "room_name": "General",
-            "sender": "@alice:example",
-            "sender_display_name": "Alice",
-            "body": "hello",
-            "event_id": "$event",
-            "server_timestamp": 123000,
-        }
-    )
+    print_message()
     meechat.command_cb("", "buffer", "inspect")
 
     assert (
