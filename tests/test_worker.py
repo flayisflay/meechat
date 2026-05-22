@@ -179,6 +179,7 @@ def test_connect_logs_in_with_password(monkeypatch):
                 self.access_token = ""
                 self.login_calls = []
                 self.callback_calls = []
+                self.ephemeral_callback_calls = []
                 FakeClient.instances.append(self)
 
             async def login(self, *, password, device_name):
@@ -191,9 +192,13 @@ def test_connect_logs_in_with_password(monkeypatch):
             def add_event_callback(self, callback, event_type):
                 self.callback_calls.append((callback, event_type))
 
+            def add_ephemeral_callback(self, callback, event_type):
+                self.ephemeral_callback_calls.append((callback, event_type))
+
         fake_nio = SimpleNamespace(
             AsyncClient=FakeClient,
             AsyncClientConfig=FakeClientConfig,
+            ReceiptEvent=object,
             RoomMessageText=object,
         )
         monkeypatch.setitem(sys.modules, "nio", fake_nio)
@@ -224,6 +229,7 @@ def test_connect_logs_in_with_password(monkeypatch):
         assert not client.config.store_sync_tokens
         assert client.login_calls == [("secret", "MeeChat")]
         assert client.callback_calls
+        assert client.ephemeral_callback_calls
         assert worker.config.user_id == "@alice:example"
         assert worker.config.device_id == "SERVERDEVICE"
         assert worker.config.access_token == "SERVER_TOKEN"
@@ -253,6 +259,55 @@ def test_on_room_message_emits_sender_display_name():
         message = loads(stdout.getvalue())
         assert message["sender"] == "@alice:example"
         assert message["sender_display_name"] == "Alice"
+
+    asyncio.run(run_test())
+
+
+def test_on_receipt_emits_display_names_for_public_read_receipts():
+    async def run_test():
+        users = {
+            "@alice:example": SimpleNamespace(display_name="Alice"),
+            "@bob:example": SimpleNamespace(display_name="Bob"),
+        }
+        room = SimpleNamespace(
+            room_id="!room:example",
+            display_name="General",
+            users=users,
+        )
+        event = SimpleNamespace(
+            receipts=[
+                SimpleNamespace(
+                    event_id="$event",
+                    receipt_type="m.read",
+                    user_id="@alice:example",
+                    timestamp=123000,
+                ),
+                SimpleNamespace(
+                    event_id="$event",
+                    receipt_type="m.read.private",
+                    user_id="@bob:example",
+                    timestamp=124000,
+                ),
+            ]
+        )
+        stdout = io.StringIO()
+        worker = MatrixWorker(stdout=stdout)
+
+        await worker.on_receipt(room, event)
+
+        message = loads(stdout.getvalue())
+        assert message == {
+            "type": "read_receipts",
+            "room_id": "!room:example",
+            "receipts": [
+                {
+                    "event_id": "$event",
+                    "user_id": "@alice:example",
+                    "display_name": "Alice",
+                    "timestamp": 123000,
+                }
+            ],
+        }
 
     asyncio.run(run_test())
 

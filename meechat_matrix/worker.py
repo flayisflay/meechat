@@ -204,7 +204,7 @@ class MatrixWorker:
             return
 
         try:
-            from nio import AsyncClient, RoomMessageText
+            from nio import AsyncClient, ReceiptEvent, RoomMessageText
 
             try:
                 from nio import AsyncClientConfig as ClientConfig
@@ -265,6 +265,9 @@ class MatrixWorker:
             )
 
         self.client.add_event_callback(self.on_room_message, RoomMessageText)
+        add_ephemeral_callback = getattr(self.client, "add_ephemeral_callback", None)
+        if add_ephemeral_callback is not None:
+            add_ephemeral_callback(self.on_receipt, ReceiptEvent)
         self.sync_task = asyncio.create_task(self.sync_loop())
 
     async def disconnect(self) -> None:
@@ -362,6 +365,39 @@ class MatrixWorker:
                 "server_timestamp": getattr(event, "server_timestamp", 0),
             }
         )
+
+    async def on_receipt(self, room: Any, event: Any) -> None:
+        room_id = getattr(room, "room_id", "")
+        if not room_id:
+            return
+
+        receipts = []
+        for receipt in getattr(event, "receipts", []) or []:
+            if _receipt_type_value(getattr(receipt, "receipt_type", "")) != "m.read":
+                continue
+
+            event_id = str(getattr(receipt, "event_id", "") or "")
+            user_id = str(getattr(receipt, "user_id", "") or "")
+            if not event_id or not user_id:
+                continue
+
+            receipts.append(
+                {
+                    "event_id": event_id,
+                    "user_id": user_id,
+                    "display_name": _sender_display_name(room, user_id),
+                    "timestamp": int(getattr(receipt, "timestamp", 0) or 0),
+                }
+            )
+
+        if receipts:
+            await self.emit(
+                {
+                    "type": "read_receipts",
+                    "room_id": room_id,
+                    "receipts": receipts,
+                }
+            )
 
     async def send_message(self, room_id: str, body: str) -> None:
         if self.client is None:
@@ -480,6 +516,10 @@ def _sender_display_name(room: Any, sender: str) -> str:
             return str(name)
 
     return sender
+
+
+def _receipt_type_value(receipt_type: Any) -> str:
+    return str(getattr(receipt_type, "value", receipt_type) or "")
 
 
 def _sync_filter(backlog_limit: int) -> dict[str, Any]:

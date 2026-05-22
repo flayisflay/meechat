@@ -71,6 +71,7 @@ BUFFER_ROOMS: dict[str, str] = {}
 ROOM_NAMES: dict[str, str] = {}
 ROOM_MESSAGES: dict[str, list[dict[str, Any]]] = {}
 ROOM_INSPECT_INDEX: dict[str, int] = {}
+ROOM_READ_RECEIPTS: dict[str, dict[str, dict[str, Any]]] = {}
 INSPECT_BAR_ITEM = ""
 INSPECT_BAR = ""
 INSPECT_HISTORY_LIMIT = 500
@@ -273,6 +274,10 @@ def _handle_worker_message(message: dict[str, Any]) -> None:
         _print_matrix_message(message)
         return
 
+    if message_type == "read_receipts":
+        _record_read_receipts(message)
+        return
+
     if message_type == "send_ok":
         _debug(f"sent {message.get('event_id', '')}")
         return
@@ -404,6 +409,27 @@ def _record_room_message(room_id: str, message: dict[str, Any]) -> None:
     _update_inspect_bar()
 
 
+def _record_read_receipts(message: dict[str, Any]) -> None:
+    room_id = str(message.get("room_id") or "")
+    if not room_id:
+        return
+
+    room_receipts = ROOM_READ_RECEIPTS.setdefault(room_id, {})
+    for receipt in message.get("receipts") or []:
+        event_id = str(receipt.get("event_id") or "")
+        user_id = str(receipt.get("user_id") or "")
+        if not event_id or not user_id:
+            continue
+        room_receipts[user_id] = {
+            "event_id": event_id,
+            "user_id": user_id,
+            "display_name": str(receipt.get("display_name") or user_id),
+            "timestamp": int(receipt.get("timestamp") or 0),
+        }
+
+    _update_inspect_bar()
+
+
 def _show_inspect(buffer: str) -> None:
     room_id = _inspect_room_from_context(buffer)
     if not room_id:
@@ -497,14 +523,12 @@ def inspect_bar_item_cb(
 
 
 def _inspect_text(room_id: str) -> str:
-    room_name = ROOM_NAMES.get(room_id, room_id)
     messages = ROOM_MESSAGES.get(room_id, [])
     if not messages:
         return "\n".join(
             [
-                f"room: {room_name}",
-                f"id: {room_id}",
                 "message: none",
+                "read receipts:",
             ]
         )
 
@@ -519,9 +543,10 @@ def _inspect_text(room_id: str) -> str:
     event_id = str(message.get("event_id") or "")
     timestamp = int(message.get("timestamp") or 0)
     body = _single_line_body(str(message.get("body") or ""))
+    receipts = _read_receipts_for_message(room_id, str(event_id), index)
 
     lines = [
-        f"room: {room_name} | message: {index + 1}/{len(messages)}",
+        f"message: {index + 1}/{len(messages)}",
         f"time: {_format_inspect_time(timestamp)} | sender: {display_name}",
     ]
     if sender and sender != display_name:
@@ -529,7 +554,58 @@ def _inspect_text(room_id: str) -> str:
     if event_id:
         lines.append(f"event: {event_id}")
     lines.append(f"body: {body}")
+    lines.append("read receipts: " + _format_read_receipts(receipts))
     return "\n".join(lines)
+
+
+def _read_receipts_for_message(
+    room_id: str,
+    event_id: str,
+    message_index: int,
+) -> list[dict[str, Any]]:
+    if not event_id:
+        return []
+
+    event_positions = {
+        str(message.get("event_id")): index
+        for index, message in enumerate(ROOM_MESSAGES.get(room_id, []))
+        if message.get("event_id")
+    }
+    receipts = []
+    for receipt in ROOM_READ_RECEIPTS.get(room_id, {}).values():
+        receipt_event_id = str(receipt.get("event_id") or "")
+        receipt_index = event_positions.get(receipt_event_id)
+        if receipt_event_id == event_id or (
+            receipt_index is not None and receipt_index >= message_index
+        ):
+            receipts.append(receipt)
+
+    return sorted(
+        receipts,
+        key=lambda receipt: (
+            int(receipt.get("timestamp") or 0),
+            str(receipt.get("display_name") or receipt.get("user_id") or ""),
+        ),
+    )
+
+
+def _format_read_receipts(receipts: list[dict[str, Any]]) -> str:
+    return " ".join(
+        _colored_receipt_label(str(receipt.get("display_name") or ""))
+        for receipt in receipts
+    )
+
+
+def _colored_receipt_label(display_name: str) -> str:
+    label = display_name.strip()[:3]
+    if not label:
+        return ""
+
+    color = weechat.info_get("nick_color_name", display_name)
+    if not color:
+        return label
+
+    return f"{weechat.color(color)}{label}{weechat.color('reset')}"
 
 
 def _single_line_body(body: str) -> str:
@@ -623,6 +699,7 @@ def room_close_cb(data: str, buffer: str) -> int:
         ROOM_BUFFERS.pop(room_id, None)
         ROOM_MESSAGES.pop(room_id, None)
         ROOM_INSPECT_INDEX.pop(room_id, None)
+        ROOM_READ_RECEIPTS.pop(room_id, None)
         _update_inspect_bar()
     BUFFER_ROOMS.pop(buffer, None)
     return weechat.WEECHAT_RC_OK

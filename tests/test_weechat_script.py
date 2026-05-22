@@ -145,6 +145,7 @@ def test_inspect_monitor_steps_through_room_messages(monkeypatch):
     monkeypatch.setattr(meechat, "ROOM_NAMES", {})
     monkeypatch.setattr(meechat, "ROOM_MESSAGES", {})
     monkeypatch.setattr(meechat, "ROOM_INSPECT_INDEX", {})
+    monkeypatch.setattr(meechat, "ROOM_READ_RECEIPTS", {})
     monkeypatch.setattr(meechat, "INSPECT_BAR_ITEM", "")
     monkeypatch.setattr(meechat, "INSPECT_BAR", "")
 
@@ -176,10 +177,12 @@ def test_inspect_monitor_steps_through_room_messages(monkeypatch):
     assert "meechat_inspect" in fake.bar_item_updates
 
     rendered = meechat.inspect_bar_item_cb("", "", "", "buffer", {})
-    assert "room: General | message: 2/2" in rendered
+    assert "room:" not in rendered
+    assert "message: 2/2" in rendered
     assert "sender: Bob" in rendered
     assert "event: $two" in rendered
     assert "body: second" in rendered
+    assert "read receipts:" in rendered
 
     meechat.command_cb("", "buffer", "inspect-prev")
 
@@ -190,6 +193,62 @@ def test_inspect_monitor_steps_through_room_messages(monkeypatch):
     assert "body: first" in rendered
 
 
+def test_inspect_monitor_shows_colored_read_receipts(monkeypatch):
+    fake = FakeWeechat()
+    monkeypatch.setattr(meechat, "weechat", fake)
+    monkeypatch.setattr(meechat, "ROOM_BUFFERS", {})
+    monkeypatch.setattr(meechat, "BUFFER_ROOMS", {})
+    monkeypatch.setattr(meechat, "ROOM_NAMES", {})
+    monkeypatch.setattr(meechat, "ROOM_MESSAGES", {})
+    monkeypatch.setattr(meechat, "ROOM_INSPECT_INDEX", {})
+    monkeypatch.setattr(meechat, "ROOM_READ_RECEIPTS", {})
+    monkeypatch.setattr(meechat, "INSPECT_BAR_ITEM", "")
+    monkeypatch.setattr(meechat, "INSPECT_BAR", "")
+
+    for event_id, body in (("$one", "first"), ("$two", "second")):
+        meechat._print_matrix_message(
+            {
+                "room_id": "!room:example",
+                "room_name": "General",
+                "sender": "@alice:example",
+                "sender_display_name": "Alice",
+                "body": body,
+                "event_id": event_id,
+                "server_timestamp": 123000,
+            }
+        )
+
+    meechat._record_read_receipts(
+        {
+            "room_id": "!room:example",
+            "receipts": [
+                {
+                    "event_id": "$two",
+                    "user_id": "@beatrice:example",
+                    "display_name": "Beatrice",
+                    "timestamp": 124000,
+                },
+                {
+                    "event_id": "$two",
+                    "user_id": "@charlie:example",
+                    "display_name": "Charlie",
+                    "timestamp": 125000,
+                },
+            ],
+        }
+    )
+
+    meechat.command_cb("", "buffer", "inspect")
+
+    rendered = meechat.inspect_bar_item_cb("", "", "", "buffer", {})
+    assert "read receipts: <red>Bea<reset> <red>Cha<reset>" in rendered
+
+    meechat.command_cb("", "buffer", "inspect-prev")
+
+    rendered = meechat.inspect_bar_item_cb("", "", "", "buffer", {})
+    assert "read receipts: <red>Bea<reset> <red>Cha<reset>" in rendered
+
+
 def test_room_buffer_binds_inspect_navigation_and_creates_top_monitor(monkeypatch):
     fake = FakeWeechat()
     monkeypatch.setattr(meechat, "weechat", fake)
@@ -198,6 +257,7 @@ def test_room_buffer_binds_inspect_navigation_and_creates_top_monitor(monkeypatc
     monkeypatch.setattr(meechat, "ROOM_NAMES", {})
     monkeypatch.setattr(meechat, "ROOM_MESSAGES", {})
     monkeypatch.setattr(meechat, "ROOM_INSPECT_INDEX", {})
+    monkeypatch.setattr(meechat, "ROOM_READ_RECEIPTS", {})
     monkeypatch.setattr(meechat, "INSPECT_BAR_ITEM", "")
     monkeypatch.setattr(meechat, "INSPECT_BAR", "")
 
