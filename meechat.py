@@ -116,7 +116,6 @@ INSPECT_ACTIONS = [
         "key": "p",
         "name": "permalink",
         "label": "[p]ermalink",
-        "prompt": "",
     },
 ]
 
@@ -704,7 +703,7 @@ def _show_inspect(buffer: str) -> None:
 
     _ensure_inspect_bar()
     _select_inspect_room(room_id)
-    _clear_inspect_selection(buffer, room_id)
+    _clear_inspect_action_mode(buffer, room_id)
     _highlight_inspect_message(room_id)
     _update_inspect_bar()
 
@@ -723,7 +722,7 @@ def _inspect_step(buffer: str, direction: int) -> None:
 
     _ensure_inspect_bar()
     _select_inspect_room(room_id)
-    _clear_inspect_selection(buffer, room_id)
+    _clear_inspect_action_mode(buffer, room_id)
     messages = ROOM_MESSAGES.get(room_id, [])
     if messages:
         index = ROOM_INSPECT_INDEX.get(room_id, len(messages) - 1)
@@ -859,8 +858,8 @@ def _choose_inspect_action(buffer: str, key: str) -> None:
 
 
 def _open_inspect_action_menu(buffer: str, room_id: str) -> None:
-    selected = _selected_inspect_message(room_id)
-    if selected is None:
+    current = _current_inspect_message(room_id)
+    if current is None:
         _log(
             "inspect action menu blocked; no selected message: "
             f"room_id={_redacted_text(room_id)}"
@@ -868,7 +867,7 @@ def _open_inspect_action_menu(buffer: str, room_id: str) -> None:
         weechat.prnt(buffer, "meechat: no inspected message is selected")
         return
 
-    index, message = selected
+    index, message = current
     _log(
         "inspect action menu opened: "
         f"room_id={_redacted_text(room_id)} index={index} "
@@ -894,7 +893,7 @@ def _move_inspect_action(room_id: str, direction: int) -> None:
 def _start_selected_inspect_action(buffer: str, room_id: str) -> None:
     selected = int(INSPECT_ACTION_STATE.get(room_id, {}).get("selected") or 0)
     action = INSPECT_ACTIONS[selected]
-    message_data = _selected_inspect_message(room_id)
+    message_data = _current_inspect_message(room_id)
     if message_data is None:
         _log(
             "inspect action start blocked; selected message missing: "
@@ -939,7 +938,7 @@ def _start_selected_inspect_action(buffer: str, room_id: str) -> None:
 def _complete_inspect_action(buffer: str, room_id: str, input_text: str) -> None:
     state = INSPECT_ACTION_STATE.get(room_id, {})
     action = str(state.get("action") or "")
-    message_data = _selected_inspect_message(room_id)
+    message_data = _current_inspect_message(room_id)
     if message_data is None or not action:
         _log(
             "inspect action completion blocked: "
@@ -991,9 +990,9 @@ def _exit_inspect_action_mode(buffer: str, room_id: str) -> None:
     _update_inspect_bar()
 
 
-def _clear_inspect_selection(buffer: str, room_id: str) -> None:
+def _clear_inspect_action_mode(buffer: str, room_id: str) -> None:
     if room_id in INSPECT_ACTION_STATE:
-        _log(f"clearing inspect selection: room_id={_redacted_text(room_id)}")
+        _log(f"clearing inspect action mode: room_id={_redacted_text(room_id)}")
         INSPECT_ACTION_STATE.pop(room_id, None)
         _set_inspect_action_keys(buffer, False)
     _restore_inspect_highlight(room_id)
@@ -1013,11 +1012,11 @@ def _set_inspect_action_keys(buffer: str, enabled: bool) -> None:
         weechat.buffer_set(buffer, "key_bind_" + action["key"], command)
 
 
-def _selected_inspect_message(room_id: str) -> tuple[int, dict[str, Any]] | None:
+def _current_inspect_message(room_id: str) -> tuple[int, dict[str, Any]] | None:
     messages = ROOM_MESSAGES.get(room_id, [])
     if not messages:
         _log(
-            "selected inspect message unavailable; no cached messages: "
+            "current inspect message unavailable; no cached messages: "
             f"room_id={_redacted_text(room_id)}"
         )
         return None
@@ -1028,7 +1027,7 @@ def _selected_inspect_message(room_id: str) -> tuple[int, dict[str, Any]] | None
     )
     ROOM_INSPECT_INDEX[room_id] = index
     _log(
-        "selected inspect message resolved: "
+        "current inspect message resolved: "
         f"room_id={_redacted_text(room_id)} index={index} "
         f"event_id={_redacted_text(messages[index].get('event_id', ''))}"
     )
@@ -1274,9 +1273,6 @@ def _ensure_topic_bar() -> None:
 def _update_inspect_bar() -> None:
     if INSPECT_BAR_ITEM:
         weechat.bar_item_update("meechat_inspect")
-        _log(f"inspect bar item update requested: item={INSPECT_BAR_ITEM}")
-    else:
-        _log("inspect bar item update skipped; item does not exist")
 
 
 def inspect_bar_item_cb(
@@ -1287,11 +1283,6 @@ def inspect_bar_item_cb(
     extra_info: dict[str, str],
 ) -> str:
     room_id = BUFFER_ROOMS.get(buffer, "")
-    _log(
-        "inspect bar item render: "
-        f"buffer={buffer} room_id={_redacted_text(room_id)} "
-        f"item={item} window={window}"
-    )
     if not room_id:
         return ""
     return _inspect_text(room_id)
@@ -1300,7 +1291,6 @@ def inspect_bar_item_cb(
 def _inspect_text(room_id: str) -> str:
     messages = ROOM_MESSAGES.get(room_id, [])
     if not messages:
-        _log(f"inspect text requested with no messages: room_id={_redacted_text(room_id)}")
         return "\n".join(
             [
                 "message: none",
@@ -1320,12 +1310,6 @@ def _inspect_text(room_id: str) -> str:
     timestamp = int(message.get("timestamp") or 0)
     body = _single_line_body(str(message.get("body") or ""))
     receipts = _read_receipts_for_message(room_id, str(event_id), index)
-    _log(
-        "inspect text rendered: "
-        f"room_id={_redacted_text(room_id)} index={index} "
-        f"messages={len(messages)} receipts={len(receipts)} "
-        f"event_id={_redacted_text(event_id)} body_len={len(body)}"
-    )
 
     lines = [
         f"message: {index + 1}/{len(messages)}",
@@ -1379,10 +1363,6 @@ def _read_receipts_for_message(
     message_index: int,
 ) -> list[dict[str, Any]]:
     if not event_id:
-        _log(
-            "read receipt lookup skipped; event_id empty: "
-            f"room_id={_redacted_text(room_id)} index={message_index}"
-        )
         return []
 
     event_positions = {
@@ -1399,24 +1379,16 @@ def _read_receipts_for_message(
         ):
             receipts.append(receipt)
 
-    sorted_receipts = sorted(
+    return sorted(
         receipts,
         key=lambda receipt: (
             int(receipt.get("timestamp") or 0),
             str(receipt.get("display_name") or receipt.get("user_id") or ""),
         ),
     )
-    _log(
-        "read receipts matched for inspect message: "
-        f"room_id={_redacted_text(room_id)} "
-        f"event_id={_redacted_text(event_id)} "
-        f"message_index={message_index} receipts={len(sorted_receipts)}"
-    )
-    return sorted_receipts
 
 
 def _format_read_receipts(receipts: list[dict[str, Any]]) -> str:
-    _log(f"formatting read receipts: count={len(receipts)}")
     return " ".join(
         _colored_receipt_label(str(receipt.get("display_name") or ""))
         for receipt in receipts
@@ -1426,18 +1398,12 @@ def _format_read_receipts(receipts: list[dict[str, Any]]) -> str:
 def _colored_receipt_label(display_name: str) -> str:
     label = display_name.strip()[:3]
     if not label:
-        _log("read receipt label skipped for empty display name")
         return ""
 
     color = weechat.info_get("nick_color_name", display_name)
     if not color:
-        _log(f"read receipt label uncolored: display_name={display_name!r}")
         return label
 
-    _log(
-        "read receipt label colored: "
-        f"display_name={display_name!r} label={label!r} color={color}"
-    )
     return f"{weechat.color(color)}{label}{weechat.color('reset')}"
 
 
