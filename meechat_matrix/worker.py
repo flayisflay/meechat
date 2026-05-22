@@ -159,6 +159,7 @@ class MatrixWorker:
         self.client: Any | None = None
         self.sync_task: asyncio.Task[None] | None = None
         self.connected = False
+        self.room_prev_batch: dict[str, str] = {}
         self.stopping = asyncio.Event()
         self._write_lock = asyncio.Lock()
         self.log(
@@ -249,6 +250,14 @@ class MatrixWorker:
         if message_type == "rooms":
             self.log("rooms command received")
             await self.emit_rooms()
+            return True
+
+        if message_type == "backfill":
+            self.log(
+                "backfill command received: "
+                f"room_id={_redacted_text(message.get('room_id', ''))}"
+            )
+            await self.backfill(str(message.get("room_id") or ""))
             return True
 
         if message_type == "send_message":
@@ -470,6 +479,7 @@ class MatrixWorker:
         else:
             self.log("close_client skipped; no Matrix client")
         self.connected = False
+        self.room_prev_batch.clear()
         self.log("client state cleared")
 
     async def sync_loop(self) -> None:
@@ -513,6 +523,7 @@ class MatrixWorker:
                             await self.emit(
                                 {"type": "connected", "user_id": self.config.user_id}
                             )
+                        self.update_room_prev_batches(response)
                         await self.emit(
                             {
                                 "type": "sync",
@@ -687,6 +698,91 @@ class MatrixWorker:
                 "sender": sender,
                 "sender_display_name": _sender_display_name(room, sender),
                 "server_timestamp": getattr(event, "server_timestamp", 0),
+            }
+        )
+
+    def update_room_prev_batches(self, response: Any) -> None:
+        rooms = getattr(getattr(response, "rooms", None), "join", {}) or {}
+        updated = 0
+        for room_id, room_info in rooms.items():
+            if room_id in self.room_prev_batch:
+                continue
+            timeline = getattr(room_info, "timeline", None)
+            prev_batch = str(getattr(timeline, "prev_batch", "") or "")
+            if not prev_batch:
+                continue
+            self.room_prev_batch[str(room_id)] = prev_batch
+            updated += 1
+        if updated:
+            self.log(f"stored room pagination tokens: updated={updated}")
+
+    async def backfill(self, room_id: str) -> None:
+        if self.client is None or self.config is None:
+            self.log("backfill rejected; not connected")
+            await self.emit_error("not connected", where="backfill", room_id=room_id)
+            return
+        if not room_id.strip():
+            self.log("backfill rejected; room_id empty")
+            await self.emit_error("room_id is required", where="backfill")
+            return
+
+        room_id = room_id.strip()
+        token = self.room_prev_batch.get(room_id, "")
+        if not token:
+            self.log(f"backfill exhausted: room_id={_redacted_text(room_id)}")
+            await self.emit(
+                {
+                    "type": "backfill",
+                    "room_id": room_id,
+                    "messages": [],
+                    "reactions": [],
+                    "exhausted": True,
+                }
+            )
+            return
+
+        self.log(
+            "backfill starting: "
+            f"room_id={_redacted_text(room_id)} token_present={bool(token)} "
+            f"limit={self.config.backlog_limit}"
+        )
+        response = await self.client.room_messages(
+            room_id,
+            start=token,
+            direction="b",
+            limit=self.config.backlog_limit,
+        )
+        if response.__class__.__name__ != "RoomMessagesResponse":
+            self.log(f"backfill failed: response={response}")
+            await self.emit_error(str(response), where="backfill", room_id=room_id)
+            return
+
+        next_token = str(getattr(response, "end", "") or "")
+        self.room_prev_batch[room_id] = next_token
+        room = getattr(self.client, "rooms", {}).get(room_id)
+        messages = []
+        reactions = []
+        for event in reversed(getattr(response, "chunk", []) or []):
+            message_payload = _message_payload_from_event(room, room_id, event)
+            if message_payload is not None:
+                messages.append(message_payload)
+                continue
+            reaction_payload = _reaction_payload_from_event(room, room_id, event)
+            if reaction_payload is not None:
+                reactions.append(reaction_payload)
+
+        self.log(
+            "backfill emitting: "
+            f"room_id={_redacted_text(room_id)} messages={len(messages)} "
+            f"reactions={len(reactions)} exhausted={not bool(next_token)}"
+        )
+        await self.emit(
+            {
+                "type": "backfill",
+                "room_id": room_id,
+                "messages": messages,
+                "reactions": reactions,
+                "exhausted": not bool(next_token),
             }
         )
 
@@ -998,6 +1094,52 @@ def _message_action_event(
         )
 
     return "", None
+
+
+def _message_payload_from_event(
+    room: Any,
+    room_id: str,
+    event: Any,
+) -> dict[str, Any] | None:
+    body = getattr(event, "body", None)
+    event_id = str(getattr(event, "event_id", "") or "")
+    sender = str(getattr(event, "sender", "") or "")
+    if body is None or not event_id or not sender:
+        return None
+    return {
+        "type": "message",
+        "room_id": room_id,
+        "room_name": _room_name(room),
+        "room_topic": _room_topic(room),
+        "sender": sender,
+        "sender_display_name": _sender_display_name(room, sender),
+        "body": str(body),
+        "event_id": event_id,
+        "server_timestamp": getattr(event, "server_timestamp", 0),
+    }
+
+
+def _reaction_payload_from_event(
+    room: Any,
+    room_id: str,
+    event: Any,
+) -> dict[str, Any] | None:
+    target_event_id = str(getattr(event, "reacts_to", "") or "")
+    key = str(getattr(event, "key", "") or "")
+    event_id = str(getattr(event, "event_id", "") or "")
+    sender = str(getattr(event, "sender", "") or "")
+    if not target_event_id or not key or not event_id or not sender:
+        return None
+    return {
+        "type": "reaction",
+        "room_id": room_id,
+        "event_id": event_id,
+        "target_event_id": target_event_id,
+        "key": key,
+        "sender": sender,
+        "sender_display_name": _sender_display_name(room, sender),
+        "server_timestamp": getattr(event, "server_timestamp", 0),
+    }
 
 
 def _sender_display_name(room: Any, sender: str) -> str:

@@ -14,6 +14,7 @@ class FakeWeechat:
         self.buffers = []
         self.buffer_properties = []
         self.commands = []
+        self.cleared_buffers = []
         self.bar_items = []
         self.bars = []
         self.existing_bars = {}
@@ -81,6 +82,10 @@ class FakeWeechat:
 
     def command(self, buffer, command):
         self.commands.append((buffer, command))
+
+    def buffer_clear(self, buffer):
+        self.cleared_buffers.append(buffer)
+        self.last_line_by_lines.pop(f"lines:{buffer}", None)
 
     def prnt_date_tags(self, buffer, timestamp, tags, message):
         self.printed_lines.append((buffer, timestamp, tags, message))
@@ -207,6 +212,9 @@ def fresh_meechat(monkeypatch):
         ("ROOM_INSPECT_INDEX", {}),
         ("ROOM_READ_RECEIPTS", {}),
         ("ROOM_REACTIONS", {}),
+        ("ROOM_BACKFILL_PENDING", set()),
+        ("ROOM_BACKFILL_EXHAUSTED", set()),
+        ("ROOM_BACKFILL_SELECT_PREVIOUS", set()),
         ("ROOM_HIGHLIGHTED_INDEX", {}),
         ("INSPECT_ACTION_STATE", {}),
         ("INSPECT_ACTIVE_ROOMS", set()),
@@ -553,6 +561,109 @@ def test_inspect_navigation_scrolls_only_when_selection_leaves_view(fresh_meecha
     )
     assert ("buffer", "/window page_up") not in fake.commands
     assert ("buffer", "/window page_down") not in fake.commands
+
+
+def test_inspect_navigation_requests_backfill_at_oldest_message(
+    monkeypatch,
+    fresh_meechat,
+):
+    fake = fresh_meechat
+    monkeypatch.setattr(meechat, "WORKER_HOOK", "worker-hook")
+    for event_id, body in (("$one", "first"), ("$two", "second")):
+        meechat._print_matrix_message(
+            {
+                "room_id": "!room:example",
+                "room_name": "General",
+                "sender": "@alice:example",
+                "sender_display_name": "Alice",
+                "body": body,
+                "event_id": event_id,
+                "server_timestamp": 123000,
+            }
+        )
+
+    meechat.command_cb("", "buffer", "inspect")
+    meechat.command_cb("", "buffer", "inspect-prev")
+    meechat.command_cb("", "buffer", "inspect-prev")
+    meechat.command_cb("", "buffer", "inspect-prev")
+
+    backfill_payloads = [
+        meechat.loads(payload)
+        for _hook, property_name, payload in fake.hook_sets
+        if property_name == "stdin"
+    ]
+    assert backfill_payloads == [
+        {"type": "backfill", "room_id": "!room:example"}
+    ]
+    assert meechat.ROOM_BACKFILL_PENDING == {"!room:example"}
+    assert meechat.ROOM_BACKFILL_SELECT_PREVIOUS == {"!room:example"}
+
+
+def test_backfill_prepends_history_and_selects_next_older_message(
+    monkeypatch,
+    fresh_meechat,
+):
+    fake = fresh_meechat
+    monkeypatch.setattr(meechat, "WORKER_HOOK", "worker-hook")
+    for event_id, body in (("$one", "first"), ("$two", "second")):
+        meechat._print_matrix_message(
+            {
+                "room_id": "!room:example",
+                "room_name": "General",
+                "sender": "@alice:example",
+                "sender_display_name": "Alice",
+                "body": body,
+                "event_id": event_id,
+                "server_timestamp": 123000,
+            }
+        )
+
+    meechat.command_cb("", "buffer", "inspect")
+    meechat.command_cb("", "buffer", "inspect-prev")
+    meechat.command_cb("", "buffer", "inspect-prev")
+
+    meechat._record_backfill(
+        {
+            "type": "backfill",
+            "room_id": "!room:example",
+            "messages": [
+                {
+                    "room_id": "!room:example",
+                    "room_name": "General",
+                    "sender": "@bob:example",
+                    "sender_display_name": "Bob",
+                    "body": "older one",
+                    "event_id": "$older1",
+                    "server_timestamp": 121000,
+                },
+                {
+                    "room_id": "!room:example",
+                    "room_name": "General",
+                    "sender": "@carol:example",
+                    "sender_display_name": "Carol",
+                    "body": "older two",
+                    "event_id": "$older2",
+                    "server_timestamp": 122000,
+                },
+            ],
+            "reactions": [],
+            "exhausted": False,
+        }
+    )
+
+    assert [m["event_id"] for m in meechat.ROOM_MESSAGES["!room:example"]] == [
+        "$older1",
+        "$older2",
+        "$one",
+        "$two",
+    ]
+    assert meechat.ROOM_INSPECT_INDEX["!room:example"] == 1
+    assert fake.cleared_buffers == ["buffer"]
+    rendered = meechat.inspect_bar_item_cb("", "", "", "buffer", {})
+    assert "message: 2/4" in rendered
+    assert "sender: Carol" in rendered
+    assert "body: older two" in rendered
+    assert fake.line_data["line-data-4"]["message"] == "<reverse>older two<reset>"
 
 
 def test_ctrl_g_toggles_monitor_and_selector(fresh_meechat):

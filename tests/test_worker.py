@@ -431,6 +431,141 @@ def test_on_reaction_emits_reaction_details():
     asyncio.run(run_test())
 
 
+def test_backfill_emits_older_messages_and_updates_token():
+    async def run_test():
+        class RoomMessagesResponse:
+            def __init__(self):
+                self.chunk = [
+                    SimpleNamespace(
+                        event_id="$older2",
+                        sender="@carol:example",
+                        body="older two",
+                        server_timestamp=122000,
+                    ),
+                    SimpleNamespace(
+                        event_id="$older1",
+                        sender="@bob:example",
+                        body="older one",
+                        server_timestamp=121000,
+                    ),
+                    SimpleNamespace(
+                        event_id="$reaction",
+                        sender="@alice:example",
+                        reacts_to="$older2",
+                        key="👍",
+                        server_timestamp=123000,
+                    ),
+                ]
+                self.end = "older-token"
+
+        class FakeClient:
+            def __init__(self):
+                self.rooms = {
+                    "!room:example": SimpleNamespace(
+                        room_id="!room:example",
+                        display_name="General",
+                        topic="Topic",
+                        users={
+                            "@alice:example": SimpleNamespace(display_name="Alice"),
+                            "@bob:example": SimpleNamespace(display_name="Bob"),
+                            "@carol:example": SimpleNamespace(display_name="Carol"),
+                        },
+                    )
+                }
+                self.calls = []
+
+            async def room_messages(self, room_id, *, start, direction, limit):
+                self.calls.append((room_id, start, direction, limit))
+                return RoomMessagesResponse()
+
+        stdout = io.StringIO()
+        worker = MatrixWorker(stdout=stdout)
+        worker.config = WorkerConfig(
+            auth="token",
+            homeserver="https://matrix.example",
+            user_id="@alice:example",
+            access_token="TOKEN",
+            device_id="DEVICE",
+            backlog_limit=2,
+        )
+        worker.client = FakeClient()
+        worker.room_prev_batch["!room:example"] = "prev-token"
+
+        await worker.backfill("!room:example")
+
+        assert worker.client.calls == [("!room:example", "prev-token", "b", 2)]
+        assert worker.room_prev_batch["!room:example"] == "older-token"
+        assert loads(stdout.getvalue()) == {
+            "type": "backfill",
+            "room_id": "!room:example",
+            "messages": [
+                {
+                    "type": "message",
+                    "room_id": "!room:example",
+                    "room_name": "General",
+                    "room_topic": "Topic",
+                    "sender": "@bob:example",
+                    "sender_display_name": "Bob",
+                    "body": "older one",
+                    "event_id": "$older1",
+                    "server_timestamp": 121000,
+                },
+                {
+                    "type": "message",
+                    "room_id": "!room:example",
+                    "room_name": "General",
+                    "room_topic": "Topic",
+                    "sender": "@carol:example",
+                    "sender_display_name": "Carol",
+                    "body": "older two",
+                    "event_id": "$older2",
+                    "server_timestamp": 122000,
+                },
+            ],
+            "reactions": [
+                {
+                    "type": "reaction",
+                    "room_id": "!room:example",
+                    "event_id": "$reaction",
+                    "target_event_id": "$older2",
+                    "key": "👍",
+                    "sender": "@alice:example",
+                    "sender_display_name": "Alice",
+                    "server_timestamp": 123000,
+                }
+            ],
+            "exhausted": False,
+        }
+
+    asyncio.run(run_test())
+
+
+def test_backfill_without_pagination_token_reports_exhausted():
+    async def run_test():
+        stdout = io.StringIO()
+        worker = MatrixWorker(stdout=stdout)
+        worker.config = WorkerConfig(
+            auth="token",
+            homeserver="https://matrix.example",
+            user_id="@alice:example",
+            access_token="TOKEN",
+            device_id="DEVICE",
+        )
+        worker.client = SimpleNamespace()
+
+        await worker.backfill("!room:example")
+
+        assert loads(stdout.getvalue()) == {
+            "type": "backfill",
+            "room_id": "!room:example",
+            "messages": [],
+            "reactions": [],
+            "exhausted": True,
+        }
+
+    asyncio.run(run_test())
+
+
 def test_message_actions_send_matrix_relationship_events():
     async def run_test():
         class FakeClient:

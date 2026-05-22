@@ -75,6 +75,9 @@ ROOM_MESSAGES: dict[str, list[dict[str, Any]]] = {}
 ROOM_INSPECT_INDEX: dict[str, int] = {}
 ROOM_READ_RECEIPTS: dict[str, dict[str, dict[str, Any]]] = {}
 ROOM_REACTIONS: dict[str, dict[str, dict[str, dict[str, Any]]]] = {}
+ROOM_BACKFILL_PENDING: set[str] = set()
+ROOM_BACKFILL_EXHAUSTED: set[str] = set()
+ROOM_BACKFILL_SELECT_PREVIOUS: set[str] = set()
 ROOM_HIGHLIGHTED_INDEX: dict[str, int] = {}
 INSPECT_ACTION_STATE: dict[str, dict[str, Any]] = {}
 INSPECT_ACTIVE_ROOMS: set[str] = set()
@@ -466,6 +469,10 @@ def _handle_worker_message(message: dict[str, Any]) -> None:
         _record_reaction(message)
         return
 
+    if message_type == "backfill":
+        _record_backfill(message)
+        return
+
     if message_type == "send_ok":
         _log(f"message send confirmed; event_id={message.get('event_id', '')}")
         return
@@ -491,9 +498,14 @@ def _handle_worker_message(message: dict[str, Any]) -> None:
         return
 
     if message_type == "error":
-        target = _buffer_for_room(str(message.get("room_id") or ""))
+        room_id = str(message.get("room_id") or "")
+        target = _buffer_for_room(room_id)
         where = message.get("where", "worker")
         weechat.prnt(target, f"meechat: {where}: {message.get('message', '')}")
+        if where == "backfill" and room_id:
+            ROOM_BACKFILL_PENDING.discard(room_id)
+            ROOM_BACKFILL_SELECT_PREVIOUS.discard(room_id)
+            _update_inspect_bar()
         _log(
             "worker error: "
             f"where={where} room_id={message.get('room_id', '')} "
@@ -693,16 +705,14 @@ def _print_matrix_message(message: dict[str, Any]) -> None:
         _log("dropping Matrix message because no room buffer could be created")
         return
 
-    sender = str(message.get("sender") or "")
-    sender_display_name = str(message.get("sender_display_name") or sender)
-    body = str(message.get("body") or "")
-    timestamp_ms = int(message.get("server_timestamp") or 0)
-    timestamp = timestamp_ms // 1000 if timestamp_ms else 0
-    event_id = str(message.get("event_id") or "")
-    tags = "notify_message"
-    if sender:
-        tags += ",nick_" + sender
-    prefix = _colored_nick(sender_display_name)
+    cached = _message_cache_entry(message)
+    sender = str(cached.get("sender") or "")
+    sender_display_name = str(cached.get("sender_display_name") or sender)
+    body = str(cached.get("body") or "")
+    timestamp = int(cached.get("timestamp") or 0)
+    event_id = str(cached.get("event_id") or "")
+    tags = str(cached.get("tags") or "")
+    prefix = str(cached.get("line_prefix") or "")
     _log(
         "printing Matrix message: "
         f"room_id={_redacted_text(room_id)} buffer={buffer} "
@@ -717,20 +727,41 @@ def _print_matrix_message(message: dict[str, Any]) -> None:
         f"{prefix}\t{body}",
     )
     line, line_data = _last_printed_line_refs(buffer)
+    cached["line"] = line
+    cached["line_data"] = line_data
+    cached["line_message"] = body
     _record_room_message(
         room_id,
-        {
-            "event_id": event_id,
-            "sender": sender,
-            "sender_display_name": sender_display_name,
-            "body": body,
-            "timestamp": timestamp,
-            "line": line,
-            "line_data": line_data,
-            "line_prefix": prefix,
-            "line_message": body,
-        },
+        cached,
     )
+
+
+def _message_cache_entry(
+    message: dict[str, Any],
+    *,
+    line: str = "",
+    line_data: str = "",
+) -> dict[str, Any]:
+    sender = str(message.get("sender") or "")
+    sender_display_name = str(message.get("sender_display_name") or sender)
+    body = str(message.get("body") or "")
+    timestamp_ms = int(message.get("server_timestamp") or 0)
+    timestamp = timestamp_ms // 1000 if timestamp_ms else 0
+    tags = "notify_message"
+    if sender:
+        tags += ",nick_" + sender
+    return {
+        "event_id": str(message.get("event_id") or ""),
+        "sender": sender,
+        "sender_display_name": sender_display_name,
+        "body": body,
+        "timestamp": timestamp,
+        "tags": tags,
+        "line": line,
+        "line_data": line_data,
+        "line_prefix": _colored_nick(sender_display_name),
+        "line_message": body,
+    }
 
 
 def _record_room_message(room_id: str, message: dict[str, Any]) -> None:
@@ -828,6 +859,124 @@ def _record_reaction(message: dict[str, Any]) -> None:
     _update_inspect_bar()
 
 
+def _request_room_backfill(room_id: str, *, select_previous: bool = False) -> None:
+    if room_id in ROOM_BACKFILL_EXHAUSTED:
+        _log(f"backfill request skipped; exhausted room_id={_redacted_text(room_id)}")
+        return
+    if room_id in ROOM_BACKFILL_PENDING:
+        _log(f"backfill request skipped; pending room_id={_redacted_text(room_id)}")
+        return
+
+    ROOM_BACKFILL_PENDING.add(room_id)
+    if select_previous:
+        ROOM_BACKFILL_SELECT_PREVIOUS.add(room_id)
+    _log(
+        "requesting older room history: "
+        f"room_id={_redacted_text(room_id)} select_previous={select_previous}"
+    )
+    if not _send_to_worker({"type": "backfill", "room_id": room_id}):
+        ROOM_BACKFILL_PENDING.discard(room_id)
+        ROOM_BACKFILL_SELECT_PREVIOUS.discard(room_id)
+    _update_inspect_bar()
+
+
+def _record_backfill(message: dict[str, Any]) -> None:
+    room_id = str(message.get("room_id") or "")
+    if not room_id:
+        _log("ignoring backfill with empty room_id")
+        return
+
+    ROOM_BACKFILL_PENDING.discard(room_id)
+    if message.get("exhausted"):
+        ROOM_BACKFILL_EXHAUSTED.add(room_id)
+
+    reactions = message.get("reactions") or []
+    for reaction in reactions:
+        _record_reaction(dict(reaction))
+
+    incoming_messages = [
+        _message_cache_entry(dict(item)) for item in message.get("messages") or []
+    ]
+    existing_event_ids = {
+        str(item.get("event_id") or "")
+        for item in ROOM_MESSAGES.get(room_id, [])
+        if item.get("event_id")
+    }
+    new_messages = [
+        item
+        for item in incoming_messages
+        if item.get("event_id") and item.get("event_id") not in existing_event_ids
+    ]
+    old_selected = ROOM_INSPECT_INDEX.get(room_id)
+    select_previous = room_id in ROOM_BACKFILL_SELECT_PREVIOUS
+    ROOM_BACKFILL_SELECT_PREVIOUS.discard(room_id)
+
+    if not new_messages:
+        _log(
+            "backfill contained no new messages: "
+            f"room_id={_redacted_text(room_id)} exhausted={message.get('exhausted')}"
+        )
+        _update_inspect_bar()
+        return
+
+    if room_id in ROOM_HIGHLIGHTED_INDEX:
+        ROOM_HIGHLIGHTED_INDEX.pop(room_id, None)
+
+    messages = ROOM_MESSAGES.setdefault(room_id, [])
+    messages[:0] = new_messages
+    if old_selected is not None:
+        if select_previous and old_selected == 0:
+            ROOM_INSPECT_INDEX[room_id] = len(new_messages) - 1
+        else:
+            ROOM_INSPECT_INDEX[room_id] = old_selected + len(new_messages)
+
+    _log(
+        "prepended backfill messages: "
+        f"room_id={_redacted_text(room_id)} new_count={len(new_messages)} "
+        f"cached_count={len(messages)} selected={ROOM_INSPECT_INDEX.get(room_id)} "
+        f"exhausted={message.get('exhausted')}"
+    )
+    _rerender_room_messages(room_id)
+    _highlight_inspect_message(room_id)
+    buffer = _buffer_for_room(room_id)
+    if buffer:
+        _position_current_inspect_message(buffer, room_id, -1)
+    _update_inspect_bar()
+
+
+def _rerender_room_messages(room_id: str) -> None:
+    buffer = _buffer_for_room(room_id)
+    if not buffer:
+        _log(f"room rerender skipped; no buffer room_id={_redacted_text(room_id)}")
+        return
+
+    if hasattr(weechat, "buffer_clear"):
+        weechat.buffer_clear(buffer)
+    else:
+        weechat.command(buffer, "/buffer clear")
+
+    for message in ROOM_MESSAGES.get(room_id, []):
+        _print_cached_room_message(buffer, message)
+    _log(
+        "room messages rerendered: "
+        f"room_id={_redacted_text(room_id)} "
+        f"count={len(ROOM_MESSAGES.get(room_id, []))}"
+    )
+
+
+def _print_cached_room_message(buffer: str, message: dict[str, Any]) -> None:
+    weechat.prnt_date_tags(
+        buffer,
+        int(message.get("timestamp") or 0),
+        str(message.get("tags") or "notify_message"),
+        f"{message.get('line_prefix', '')}\t{message.get('body', '')}",
+    )
+    line, line_data = _last_printed_line_refs(buffer)
+    message["line"] = line
+    message["line_data"] = line_data
+    message["line_message"] = str(message.get("body") or "")
+
+
 def _activate_inspect_mode(buffer: str, room_id: str) -> None:
     _ensure_inspect_bar()
     INSPECT_ACTIVE_ROOMS.add(room_id)
@@ -919,11 +1068,15 @@ def _inspect_step(buffer: str, direction: int) -> None:
             f"room_id={_redacted_text(room_id)} previous={index} "
             f"current={next_index} count={len(messages)} moved={moved}"
         )
+        if direction < 0 and index == 0 and next_index == 0:
+            _request_room_backfill(room_id, select_previous=True)
     else:
         _log(
             "inspect navigation found no cached messages: "
             f"room_id={_redacted_text(room_id)}"
         )
+        if direction < 0:
+            _request_room_backfill(room_id)
     _highlight_inspect_message(room_id)
     if moved and selected_message is not None:
         _position_inspect_window(buffer, selected_message, direction)
@@ -1782,13 +1935,12 @@ def topic_bar_item_cb(
 def _inspect_text(room_id: str) -> str:
     messages = ROOM_MESSAGES.get(room_id, [])
     if not messages:
-        return "\n".join(
-            [
-                "message: none",
-                "reactions:",
-                "read receipts:",
-            ]
-        )
+        lines = ["message: none"]
+        history_line = _inspect_history_line(room_id, at_oldest=True)
+        if history_line:
+            lines.append(history_line)
+        lines.extend(["reactions:", "read receipts:"])
+        return "\n".join(lines)
 
     index = max(
         0,
@@ -1807,6 +1959,9 @@ def _inspect_text(room_id: str) -> str:
         f"message: {index + 1}/{len(messages)}",
         f"time: {_format_inspect_time(timestamp)} | sender: {display_name}",
     ]
+    history_line = _inspect_history_line(room_id, at_oldest=index == 0)
+    if history_line:
+        lines.append(history_line)
     if sender and sender != display_name:
         lines.append(f"user: {sender}")
     if event_id:
@@ -1816,6 +1971,14 @@ def _inspect_text(room_id: str) -> str:
     lines.append("read receipts: " + _format_read_receipts(receipts))
     lines.extend(_inspect_action_lines(room_id))
     return "\n".join(lines)
+
+
+def _inspect_history_line(room_id: str, *, at_oldest: bool) -> str:
+    if room_id in ROOM_BACKFILL_PENDING:
+        return "history: loading older messages"
+    if at_oldest and room_id in ROOM_BACKFILL_EXHAUSTED:
+        return "history: beginning of room history"
+    return ""
 
 
 def _inspect_action_lines(room_id: str) -> list[str]:
@@ -2064,6 +2227,9 @@ def room_close_cb(data: str, buffer: str) -> int:
         ROOM_INSPECT_INDEX.pop(room_id, None)
         ROOM_READ_RECEIPTS.pop(room_id, None)
         ROOM_REACTIONS.pop(room_id, None)
+        ROOM_BACKFILL_PENDING.discard(room_id)
+        ROOM_BACKFILL_EXHAUSTED.discard(room_id)
+        ROOM_BACKFILL_SELECT_PREVIOUS.discard(room_id)
         ROOM_TOPICS.pop(room_id, None)
         INSPECT_ACTIVE_ROOMS.discard(room_id)
         INSPECT_ACTION_STATE.pop(room_id, None)
