@@ -8,3 +8,4 @@ dist/
 *.egg-info/
 nio_store/
 meechat_matrix_store/
+weetest/
