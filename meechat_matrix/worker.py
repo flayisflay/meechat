@@ -358,6 +358,7 @@ class MatrixWorker:
                 "type": "message",
                 "room_id": room_id,
                 "room_name": _room_name(room),
+                "room_topic": _room_topic(room),
                 "sender": sender,
                 "sender_display_name": _sender_display_name(room, sender),
                 "body": body,
@@ -470,6 +471,7 @@ class MatrixWorker:
                     "type": "room",
                     "room_id": room_id,
                     "name": _room_name(room),
+                    "topic": _room_topic(room),
                     "member_count": len(getattr(room, "users", {}) or {}),
                     "encrypted": bool(getattr(room, "encrypted", False)),
                 }
@@ -499,6 +501,10 @@ def _room_name(room: Any) -> str:
         if value:
             return str(value)
     return str(getattr(room, "room_id", ""))
+
+
+def _room_topic(room: Any) -> str:
+    return str(getattr(room, "topic", "") or "")
 
 
 def _sender_display_name(room: Any, sender: str) -> str:

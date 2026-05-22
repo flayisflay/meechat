@@ -243,6 +243,7 @@ def test_on_room_message_emits_sender_display_name():
         room = SimpleNamespace(
             room_id="!room:example",
             display_name="General",
+            topic="A focused room topic",
             users={"@alice:example": user},
         )
         event = SimpleNamespace(
@@ -259,6 +260,7 @@ def test_on_room_message_emits_sender_display_name():
         message = loads(stdout.getvalue())
         assert message["sender"] == "@alice:example"
         assert message["sender_display_name"] == "Alice"
+        assert message["room_topic"] == "A focused room topic"
 
     asyncio.run(run_test())
 

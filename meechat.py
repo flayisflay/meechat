@@ -69,12 +69,14 @@ WORKER_STDOUT = ""
 ROOM_BUFFERS: dict[str, str] = {}
 BUFFER_ROOMS: dict[str, str] = {}
 ROOM_NAMES: dict[str, str] = {}
+ROOM_TOPICS: dict[str, str] = {}
 ROOM_MESSAGES: dict[str, list[dict[str, Any]]] = {}
 ROOM_INSPECT_INDEX: dict[str, int] = {}
 ROOM_READ_RECEIPTS: dict[str, dict[str, dict[str, Any]]] = {}
 ROOM_HIGHLIGHTED_INDEX: dict[str, int] = {}
 INSPECT_BAR_ITEM = ""
 INSPECT_BAR = ""
+TOPIC_BAR = ""
 INSPECT_HISTORY_LIMIT = 500
 
 
@@ -267,6 +269,7 @@ def _handle_worker_message(message: dict[str, Any]) -> None:
         _record_room(
             str(message.get("room_id") or ""),
             str(message.get("name") or ""),
+            topic=str(message.get("topic") or ""),
             encrypted=bool(message.get("encrypted", False)),
         )
         return
@@ -303,16 +306,30 @@ def _handle_worker_message(message: dict[str, Any]) -> None:
     _debug(f"ignored worker message: {message}")
 
 
-def _record_room(room_id: str, name: str, *, encrypted: bool = False) -> str:
+def _record_room(
+    room_id: str,
+    name: str,
+    *,
+    topic: str | None = None,
+    encrypted: bool = False,
+) -> str:
     if not room_id:
         return ""
 
     ROOM_NAMES[room_id] = name or room_id
+    if topic is not None:
+        ROOM_TOPICS[room_id] = topic
     buffer = _buffer_for_room(room_id)
     if not buffer:
-        buffer = _create_room_buffer(room_id, name or room_id)
+        buffer = _create_room_buffer(room_id, name or room_id, topic=topic)
     else:
-        _update_room_buffer(buffer, room_id, name or room_id, encrypted=encrypted)
+        _update_room_buffer(
+            buffer,
+            room_id,
+            name or room_id,
+            topic=topic,
+            encrypted=encrypted,
+        )
     return buffer
 
 
@@ -320,7 +337,12 @@ def _buffer_for_room(room_id: str) -> str:
     return ROOM_BUFFERS.get(room_id, "")
 
 
-def _create_room_buffer(room_id: str, name: str) -> str:
+def _create_room_buffer(
+    room_id: str,
+    name: str,
+    *,
+    topic: str | None = None,
+) -> str:
     buffer_name = "meechat." + _safe_name(room_id)
     buffer = weechat.buffer_new(
         buffer_name,
@@ -335,7 +357,7 @@ def _create_room_buffer(room_id: str, name: str) -> str:
 
     ROOM_BUFFERS[room_id] = buffer
     BUFFER_ROOMS[buffer] = room_id
-    _update_room_buffer(buffer, room_id, name)
+    _update_room_buffer(buffer, room_id, name, topic=topic)
     return buffer
 
 
@@ -344,6 +366,7 @@ def _update_room_buffer(
     room_id: str,
     name: str,
     *,
+    topic: str | None = None,
     encrypted: bool = False,
 ) -> None:
     short_name = name or room_id
@@ -351,7 +374,9 @@ def _update_room_buffer(
         short_name += " [encrypted]"
 
     weechat.buffer_set(buffer, "short_name", short_name)
-    weechat.buffer_set(buffer, "title", f"Matrix: {name or room_id} ({room_id})")
+    if topic is not None:
+        ROOM_TOPICS[room_id] = topic
+    weechat.buffer_set(buffer, "title", ROOM_TOPICS.get(room_id, ""))
     weechat.buffer_set(buffer, "localvar_set_type", "matrix")
     weechat.buffer_set(buffer, "localvar_set_room_id", room_id)
     weechat.buffer_set(buffer, "key_bind_meta-shift-up", "/meechat inspect-prev")
@@ -361,7 +386,10 @@ def _update_room_buffer(
 def _print_matrix_message(message: dict[str, Any]) -> None:
     room_id = str(message.get("room_id") or "")
     room_name = str(message.get("room_name") or ROOM_NAMES.get(room_id, room_id))
-    buffer = _record_room(room_id, room_name)
+    room_topic = (
+        str(message.get("room_topic") or "") if "room_topic" in message else None
+    )
+    buffer = _record_room(room_id, room_name, topic=room_topic)
     if not buffer:
         return
 
@@ -567,29 +595,57 @@ def _ensure_inspect_bar() -> None:
             "",
         )
 
-    if INSPECT_BAR:
+    if not INSPECT_BAR:
+        INSPECT_BAR = weechat.bar_new(
+            "meechat_inspect",
+            "off",
+            "100",
+            "window",
+            "${buffer.local_variables.type} == matrix",
+            "top",
+            "vertical",
+            "vertical",
+            "0",
+            "6",
+            "default",
+            "default",
+            "default",
+            "default",
+            "on",
+            "meechat_inspect",
+        )
+        if not INSPECT_BAR:
+            weechat.prnt("", "meechat: failed to create inspect bar")
+
+    _ensure_topic_bar()
+
+
+def _ensure_topic_bar() -> None:
+    global TOPIC_BAR
+
+    if TOPIC_BAR:
         return
 
-    INSPECT_BAR = weechat.bar_new(
-        "meechat_inspect",
+    TOPIC_BAR = weechat.bar_new(
+        "meechat_topic",
         "off",
-        "100",
+        "99",
         "window",
         "${buffer.local_variables.type} == matrix",
         "top",
-        "vertical",
+        "horizontal",
         "vertical",
         "0",
-        "6",
+        "1",
         "default",
         "default",
-        "default",
+        "blue",
         "default",
         "on",
-        "meechat_inspect",
+        "buffer_title",
     )
-    if not INSPECT_BAR:
-        weechat.prnt("", "meechat: failed to create inspect bar")
+    if not TOPIC_BAR:
+        weechat.prnt("", "meechat: failed to create topic bar")
 
 
 def _update_inspect_bar() -> None:
@@ -704,11 +760,14 @@ def _single_line_body(body: str) -> str:
 
 
 def _remove_inspect_bar() -> None:
-    global INSPECT_BAR, INSPECT_BAR_ITEM
+    global INSPECT_BAR, INSPECT_BAR_ITEM, TOPIC_BAR
 
     if INSPECT_BAR:
         weechat.bar_remove(INSPECT_BAR)
         INSPECT_BAR = ""
+    if TOPIC_BAR:
+        weechat.bar_remove(TOPIC_BAR)
+        TOPIC_BAR = ""
     if INSPECT_BAR_ITEM:
         weechat.bar_item_remove(INSPECT_BAR_ITEM)
         INSPECT_BAR_ITEM = ""
@@ -789,6 +848,7 @@ def room_close_cb(data: str, buffer: str) -> int:
         ROOM_MESSAGES.pop(room_id, None)
         ROOM_INSPECT_INDEX.pop(room_id, None)
         ROOM_READ_RECEIPTS.pop(room_id, None)
+        ROOM_TOPICS.pop(room_id, None)
         _update_inspect_bar()
     BUFFER_ROOMS.pop(buffer, None)
     return weechat.WEECHAT_RC_OK

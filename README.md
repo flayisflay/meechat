@@ -129,10 +129,13 @@ Common commands:
 
 `/meechat inspect` shows the top `meechat_inspect` monitor bar for the current
 Matrix room. MeeChat room buffers bind `Alt+Shift+Up` and `Alt+Shift+Down` to
-inspect older and newer messages in that top monitor. The monitor includes a
-bottom read-receipts row using the colored first three characters of each
-reader's display name. While inspecting, the selected message is temporarily
-marked in the room buffer.
+inspect older and newer messages in that top monitor. MeeChat also adds a
+`meechat_topic` title bar below the monitor using WeeChat's `buffer_title`
+item, populated only with the room topic and using a blue title-bar background.
+The monitor includes a bottom
+read-receipts row using the colored first
+three characters of each reader's display name. While inspecting, the selected
+message is temporarily marked in the room buffer.
 
 Run tests:
 
