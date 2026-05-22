@@ -263,6 +263,24 @@ class MatrixWorker:
             )
             return True
 
+        if message_type == "message_action":
+            self.log(
+                "message_action command received: "
+                f"action={message.get('action', '')} "
+                f"room_id={_redacted_text(message.get('room_id', ''))} "
+                f"event_id={_redacted_text(message.get('event_id', ''))} "
+                f"body_len={len(str(message.get('body') or ''))} "
+                f"reason_len={len(str(message.get('reason') or ''))}"
+            )
+            await self.message_action(
+                room_id=str(message.get("room_id") or ""),
+                event_id=str(message.get("event_id") or ""),
+                action=str(message.get("action") or ""),
+                body=str(message.get("body") or ""),
+                reason=str(message.get("reason") or ""),
+            )
+            return True
+
         if message_type == "join":
             self.log(f"join command received: room={_redacted_text(message.get('room'))}")
             await self.join(str(message.get("room") or ""))
@@ -641,6 +659,99 @@ class MatrixWorker:
         self.log(f"send_message failed: response={response}")
         await self.emit_error(str(response), where="send_message", room_id=room_id)
 
+    async def message_action(
+        self,
+        *,
+        room_id: str,
+        event_id: str,
+        action: str,
+        body: str = "",
+        reason: str = "",
+    ) -> None:
+        self.log(
+            "message_action starting: "
+            f"action={action} room_id={_redacted_text(room_id)} "
+            f"event_id={_redacted_text(event_id)} body_len={len(body)} "
+            f"reason_len={len(reason)} client_present={self.client is not None}"
+        )
+        if self.client is None:
+            self.log("message_action rejected; not connected")
+            await self.emit_error("not connected", where="message_action")
+            return
+
+        if not room_id.strip() or not event_id.strip():
+            self.log("message_action rejected; room_id or event_id empty")
+            await self.emit_error(
+                "room_id and event_id are required",
+                where="message_action",
+                room_id=room_id,
+            )
+            return
+
+        if action == "remove":
+            self.log(
+                "calling Matrix room_redact: "
+                f"room_id={_redacted_text(room_id)} "
+                f"event_id={_redacted_text(event_id)} "
+                f"reason_present={bool(reason.strip())}"
+            )
+            response = await self.client.room_redact(
+                room_id=room_id,
+                event_id=event_id,
+                reason=reason.strip() or None,
+            )
+            await self.emit_action_response(action, room_id, response)
+            return
+
+        message_type, content = _message_action_event(action, event_id, body)
+        if content is None:
+            self.log(f"message_action rejected; unsupported or incomplete action={action}")
+            await self.emit_error(
+                f"unsupported or incomplete message action: {action}",
+                where="message_action",
+                room_id=room_id,
+            )
+            return
+
+        self.log(
+            "calling Matrix room_send for message action: "
+            f"action={action} message_type={message_type} "
+            f"room_id={_redacted_text(room_id)} "
+            f"event_id={_redacted_text(event_id)}"
+        )
+        response = await self.client.room_send(
+            room_id=room_id,
+            message_type=message_type,
+            content=content,
+        )
+        await self.emit_action_response(action, room_id, response)
+
+    async def emit_action_response(
+        self,
+        action: str,
+        room_id: str,
+        response: Any,
+    ) -> None:
+        event_id = getattr(response, "event_id", "")
+        if event_id:
+            self.log(
+                "message_action succeeded: "
+                f"action={action} room_id={_redacted_text(room_id)} "
+                f"event_id={_redacted_text(event_id)}"
+            )
+            await self.emit(
+                {
+                    "type": "action_ok",
+                    "action": action,
+                    "room_id": room_id,
+                    "event_id": event_id,
+                }
+            )
+            return
+
+        self.log(f"message_action failed: action={action} response={response}")
+        await self.emit_error(str(response), where="message_action", room_id=room_id)
+
     async def join(self, room: str) -> None:
         self.log(
             "join starting: "
@@ -756,6 +867,66 @@ def _room_name(room: Any) -> str:
 
 def _room_topic(room: Any) -> str:
     return str(getattr(room, "topic", "") or "")
+
+
+def _message_action_event(
+    action: str,
+    event_id: str,
+    body: str,
+) -> tuple[str, dict[str, Any] | None]:
+    text = body.strip()
+    if action in {"reply", "thread", "edit", "reaction"} and not text:
+        return "", None
+
+    if action == "reply":
+        return (
+            "m.room.message",
+            {
+                "msgtype": "m.text",
+                "body": text,
+                "m.relates_to": {"m.in_reply_to": {"event_id": event_id}},
+            },
+        )
+
+    if action == "thread":
+        return (
+            "m.room.message",
+            {
+                "msgtype": "m.text",
+                "body": text,
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": event_id,
+                    "is_falling_back": True,
+                    "m.in_reply_to": {"event_id": event_id},
+                },
+            },
+        )
+
+    if action == "edit":
+        return (
+            "m.room.message",
+            {
+                "msgtype": "m.text",
+                "body": "* " + text,
+                "m.new_content": {"msgtype": "m.text", "body": text},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": event_id},
+            },
+        )
+
+    if action == "reaction":
+        return (
+            "m.reaction",
+            {
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": event_id,
+                    "key": text,
+                }
+            },
+        )
+
+    return "", None
 
 
 def _sender_display_name(room: Any, sender: str) -> str:

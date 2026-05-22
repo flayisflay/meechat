@@ -314,6 +314,100 @@ def test_on_receipt_emits_display_names_for_public_read_receipts():
     asyncio.run(run_test())
 
 
+def test_message_actions_send_matrix_relationship_events():
+    async def run_test():
+        class FakeClient:
+            def __init__(self):
+                self.sent = []
+                self.redacted = []
+
+            async def room_send(self, *, room_id, message_type, content):
+                self.sent.append((room_id, message_type, content))
+                return SimpleNamespace(event_id="$sent", room_id=room_id)
+
+            async def room_redact(self, *, room_id, event_id, reason):
+                self.redacted.append((room_id, event_id, reason))
+                return SimpleNamespace(event_id="$redacted", room_id=room_id)
+
+        stdout = io.StringIO()
+        worker = MatrixWorker(stdout=stdout)
+        worker.client = FakeClient()
+
+        await worker.message_action(
+            room_id="!room:example",
+            event_id="$event",
+            action="reply",
+            body="reply text",
+        )
+        await worker.message_action(
+            room_id="!room:example",
+            event_id="$event",
+            action="thread",
+            body="thread text",
+        )
+        await worker.message_action(
+            room_id="!room:example",
+            event_id="$event",
+            action="edit",
+            body="edited text",
+        )
+        await worker.message_action(
+            room_id="!room:example",
+            event_id="$event",
+            action="reaction",
+            body="+1",
+        )
+        await worker.message_action(
+            room_id="!room:example",
+            event_id="$event",
+            action="remove",
+            reason="cleanup",
+        )
+
+        reply = worker.client.sent[0]
+        assert reply[1] == "m.room.message"
+        assert reply[2]["m.relates_to"] == {
+            "m.in_reply_to": {"event_id": "$event"},
+        }
+
+        thread = worker.client.sent[1]
+        assert thread[2]["m.relates_to"]["rel_type"] == "m.thread"
+        assert thread[2]["m.relates_to"]["event_id"] == "$event"
+
+        edit = worker.client.sent[2]
+        assert edit[2]["body"] == "* edited text"
+        assert edit[2]["m.new_content"]["body"] == "edited text"
+        assert edit[2]["m.relates_to"] == {
+            "rel_type": "m.replace",
+            "event_id": "$event",
+        }
+
+        reaction = worker.client.sent[3]
+        assert reaction == (
+            "!room:example",
+            "m.reaction",
+            {
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": "$event",
+                    "key": "+1",
+                }
+            },
+        )
+
+        assert worker.client.redacted == [("!room:example", "$event", "cleanup")]
+        messages = [loads(line) for line in stdout.getvalue().splitlines()]
+        assert [message["action"] for message in messages] == [
+            "reply",
+            "thread",
+            "edit",
+            "reaction",
+            "remove",
+        ]
+
+    asyncio.run(run_test())
+
+
 def test_sync_loop_stops_on_unknown_token():
     async def run_test():
         class FakeClient:
