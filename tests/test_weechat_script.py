@@ -248,6 +248,7 @@ def test_inspect_monitor_steps_through_room_messages(monkeypatch):
     assert fake.bars[0][0] == "meechat_inspect"
     assert fake.bars[0][2] == "100"
     assert fake.bars[0][5] == "top"
+    assert fake.bars[0][9] == "8"
     assert fake.bars[1][0] == "meechat_topic"
     assert fake.bars[1][2] == "99"
     assert fake.bars[1][5] == "top"
@@ -262,6 +263,14 @@ def test_inspect_monitor_steps_through_room_messages(monkeypatch):
     assert "event: $two" in rendered
     assert "body: second" in rendered
     assert "read receipts:" in rendered
+    assert "actions:" in rendered
+    assert "[r]eply" in rendered
+    assert "reply in [t]hread" in rendered
+    assert "[e]dit" in rendered
+    assert "[a]dd reaction" in rendered
+    assert "remo[v]e" in rendered
+    assert "[p]ermalink" in rendered
+    assert "enter: choose action" in rendered
 
     meechat.command_cb("", "buffer", "inspect-prev")
 

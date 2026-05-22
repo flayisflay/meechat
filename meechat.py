@@ -1208,7 +1208,7 @@ def _ensure_inspect_bar() -> None:
             "vertical",
             "vertical",
             "0",
-            "6",
+            "8",
             "default",
             "default",
             "default",
@@ -1345,7 +1345,10 @@ def _inspect_action_lines(room_id: str) -> list[str]:
             f"action: {action} | input: {prompt}",
             "enter: finish | Ctrl-G: cancel",
         ]
-    return ["enter: actions"]
+    return [
+        "actions: " + _format_inspect_action_list(),
+        "enter: choose action",
+    ]
 
 
 def _format_inspect_action_menu(room_id: str) -> str:
@@ -1359,6 +1362,10 @@ def _format_inspect_action_menu(room_id: str) -> str:
             label = f"{weechat.color('reverse')}{label}{reset}"
         parts.append(label)
     return "  ".join(parts)
+
+
+def _format_inspect_action_list() -> str:
+    return "  ".join(str(action["label"]) for action in INSPECT_ACTIONS)
 
 
 def _read_receipts_for_message(
