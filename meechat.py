@@ -697,10 +697,7 @@ def _rehydrate_room_buffers() -> None:
 def _print_matrix_message(message: dict[str, Any]) -> None:
     room_id = str(message.get("room_id") or "")
     room_name = str(message.get("room_name") or ROOM_NAMES.get(room_id, room_id))
-    room_topic = (
-        str(message.get("room_topic") or "") if "room_topic" in message else None
-    )
-    buffer = _record_room(room_id, room_name, topic=room_topic)
+    buffer = _record_room(room_id, room_name)
     if not buffer:
         _log("dropping Matrix message because no room buffer could be created")
         return
@@ -1926,7 +1923,11 @@ def topic_bar_item_cb(
     buffer: str,
     extra_info: dict[str, str],
 ) -> str:
-    room_id = BUFFER_ROOMS.get(buffer, "")
+    room_id = ""
+    if hasattr(weechat, "buffer_get_string"):
+        room_id = str(weechat.buffer_get_string(buffer, "localvar_room_id") or "")
+    if not room_id:
+        room_id = BUFFER_ROOMS.get(buffer, "")
     if not room_id:
         return ""
     return ROOM_TOPICS.get(room_id, "")
@@ -1955,17 +1956,20 @@ def _inspect_text(room_id: str) -> str:
     body = _single_line_body(str(message.get("body") or ""))
     receipts = _read_receipts_for_message(room_id, str(event_id), index)
 
+    meta_parts = [
+        f"time: {_format_inspect_time(timestamp)}",
+        f"sender: {display_name}",
+    ]
+    if sender and sender != display_name:
+        meta_parts.append(f"user: {sender}")
+
     lines = [
+        " | ".join(meta_parts),
         f"message: {index + 1}/{len(messages)}",
-        f"time: {_format_inspect_time(timestamp)} | sender: {display_name}",
     ]
     history_line = _inspect_history_line(room_id, at_oldest=index == 0)
     if history_line:
         lines.append(history_line)
-    if sender and sender != display_name:
-        lines.append(f"user: {sender}")
-    if event_id:
-        lines.append(f"event: {event_id}")
     lines.append(f"body: {body}")
     lines.append("reactions: " + _format_reactions(room_id, event_id))
     lines.append("read receipts: " + _format_read_receipts(receipts))

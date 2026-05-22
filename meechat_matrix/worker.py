@@ -983,10 +983,11 @@ class MatrixWorker:
         rooms = getattr(self.client, "rooms", {}) or {}
         self.log(f"emit_rooms found rooms={len(rooms)}")
         for room_id, room in rooms.items():
+            topic = await self.room_settings_topic(str(room_id), room)
             self.log(
                 "emitting room: "
                 f"room_id={_redacted_text(room_id)} name={_room_name(room)!r} "
-                f"topic_len={len(_room_topic(room))} "
+                f"topic_len={len(topic)} "
                 f"members={len(getattr(room, 'users', {}) or {})} "
                 f"encrypted={bool(getattr(room, 'encrypted', False))}"
             )
@@ -995,11 +996,42 @@ class MatrixWorker:
                     "type": "room",
                     "room_id": room_id,
                     "name": _room_name(room),
-                    "topic": _room_topic(room),
+                    "topic": topic,
                     "member_count": len(getattr(room, "users", {}) or {}),
                     "encrypted": bool(getattr(room, "encrypted", False)),
                 }
             )
+
+    async def room_settings_topic(self, room_id: str, room: Any) -> str:
+        if self.client is None:
+            return _room_topic(room)
+
+        get_state_event = getattr(self.client, "room_get_state_event", None)
+        if get_state_event is None:
+            self.log(
+                "room topic state fetch unavailable; falling back to cached room topic: "
+                f"room_id={_redacted_text(room_id)}"
+            )
+            return _room_topic(room)
+
+        try:
+            response = await get_state_event(room_id, "m.room.topic")
+        except Exception as exc:
+            self.log(
+                "room topic state fetch failed; leaving topic empty to avoid stale topic: "
+                f"room_id={_redacted_text(room_id)} error={exc}"
+            )
+            return ""
+
+        if response.__class__.__name__ != "RoomGetStateEventResponse":
+            self.log(
+                "room topic state fetch returned non-success response; "
+                f"room_id={_redacted_text(room_id)} response={response}"
+            )
+            return ""
+
+        content = getattr(response, "content", {}) or {}
+        return str(content.get("topic") or "")
 
     async def emit_error(
         self,

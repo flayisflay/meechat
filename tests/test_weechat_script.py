@@ -310,7 +310,17 @@ def test_print_matrix_message_uses_colored_display_name(fresh_meechat):
         "Matrix: General (!room:example)",
     ) not in fake.buffer_properties
     meechat._ensure_topic_bar()
-    assert meechat.topic_bar_item_cb("", "", "", "buffer", {}) == "Only the topic"
+    assert meechat.topic_bar_item_cb("", "", "", "buffer", {}) == ""
+
+
+def test_topic_bar_prefers_buffer_room_localvar(fresh_meechat):
+    fake = fresh_meechat
+    meechat.BUFFER_ROOMS["buffer"] = "!wrong:example"
+    meechat.ROOM_TOPICS["!wrong:example"] = "Wrong topic"
+    meechat.ROOM_TOPICS["!right:example"] = "Right topic"
+    fake.buffer_strings["buffer"] = {"localvar_room_id": "!right:example"}
+
+    assert meechat.topic_bar_item_cb("", "", "", "buffer", {}) == "Right topic"
 
 
 def test_inspect_monitor_steps_through_room_messages(fresh_meechat):
@@ -352,9 +362,12 @@ def test_inspect_monitor_steps_through_room_messages(fresh_meechat):
 
     rendered = meechat.inspect_bar_item_cb("", "", "", "buffer", {})
     assert "room:" not in rendered
+    assert rendered.splitlines()[0].startswith("time: ")
+    assert rendered.splitlines()[0].endswith(" | sender: Bob | user: @bob:example")
     assert "message: 2/2" in rendered
     assert "sender: Bob" in rendered
-    assert "event: $two" in rendered
+    assert "user: @bob:example" in rendered
+    assert "event:" not in rendered
     assert "body: second" in rendered
     assert "read receipts:" in rendered
     assert "enter: select message" in rendered
@@ -365,7 +378,8 @@ def test_inspect_monitor_steps_through_room_messages(fresh_meechat):
     rendered = meechat.inspect_bar_item_cb("", "", "", "buffer", {})
     assert "message: 1/2" in rendered
     assert "sender: Alice" in rendered
-    assert "event: $one" in rendered
+    assert "user: @alice:example" in rendered
+    assert "event:" not in rendered
     assert "body: first" in rendered
     assert "enter: select message" in rendered
 
@@ -918,15 +932,12 @@ def test_startup_rehydrates_existing_room_buffers(fresh_meechat):
 
 def test_room_topic_updates_current_topic_bar(fresh_meechat):
     fake = fresh_meechat
-    meechat._print_matrix_message(
+    meechat._handle_worker_message(
         {
+            "type": "room",
             "room_id": "!room:example",
-            "room_name": "General",
-            "room_topic": "Old topic",
-            "sender": "@alice:example",
-            "sender_display_name": "Alice",
-            "body": "hello",
-            "server_timestamp": 123000,
+            "name": "General",
+            "topic": "Old topic",
         }
     )
     meechat._ensure_topic_bar()

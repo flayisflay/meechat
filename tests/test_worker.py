@@ -348,6 +348,81 @@ def test_on_room_topic_emits_current_topic():
     asyncio.run(run_test())
 
 
+def test_emit_rooms_fetches_topic_from_room_state():
+    async def run_test():
+        class RoomGetStateEventResponse:
+            content = {"topic": "Settings topic"}
+
+        class FakeClient:
+            def __init__(self):
+                self.rooms = {
+                    "!room:example": SimpleNamespace(
+                        room_id="!room:example",
+                        display_name="General",
+                        topic="Stale cached topic",
+                        users={},
+                        encrypted=False,
+                    )
+                }
+                self.state_calls = []
+
+            async def room_get_state_event(self, room_id, event_type):
+                self.state_calls.append((room_id, event_type))
+                return RoomGetStateEventResponse()
+
+        stdout = io.StringIO()
+        worker = MatrixWorker(stdout=stdout)
+        worker.client = FakeClient()
+
+        await worker.emit_rooms()
+
+        assert worker.client.state_calls == [("!room:example", "m.room.topic")]
+        assert loads(stdout.getvalue()) == {
+            "type": "room",
+            "room_id": "!room:example",
+            "name": "General",
+            "topic": "Settings topic",
+            "member_count": 0,
+            "encrypted": False,
+        }
+
+    asyncio.run(run_test())
+
+
+def test_emit_rooms_does_not_fallback_to_stale_topic_on_state_error():
+    async def run_test():
+        class RoomGetStateEventError:
+            message = "No current state for m.room.topic"
+
+            def __str__(self):
+                return self.message
+
+        class FakeClient:
+            def __init__(self):
+                self.rooms = {
+                    "!room:example": SimpleNamespace(
+                        room_id="!room:example",
+                        display_name="General",
+                        topic="Stale cached topic",
+                        users={},
+                        encrypted=False,
+                    )
+                }
+
+            async def room_get_state_event(self, room_id, event_type):
+                return RoomGetStateEventError()
+
+        stdout = io.StringIO()
+        worker = MatrixWorker(stdout=stdout)
+        worker.client = FakeClient()
+
+        await worker.emit_rooms()
+
+        assert loads(stdout.getvalue())["topic"] == ""
+
+    asyncio.run(run_test())
+
+
 def test_on_receipt_emits_display_names_for_public_read_receipts():
     async def run_test():
         users = {
