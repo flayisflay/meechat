@@ -711,6 +711,7 @@ def _print_matrix_message(message: dict[str, Any]) -> None:
         tags,
         f"{prefix}\t{body}",
     )
+    line, line_data = _last_printed_line_refs(buffer)
     _record_room_message(
         room_id,
         {
@@ -719,7 +720,8 @@ def _print_matrix_message(message: dict[str, Any]) -> None:
             "sender_display_name": sender_display_name,
             "body": body,
             "timestamp": timestamp,
-            "line_data": _last_printed_line_data(buffer),
+            "line": line,
+            "line_data": line_data,
             "line_prefix": prefix,
             "line_message": body,
         },
@@ -838,6 +840,7 @@ def _show_inspect(buffer: str) -> None:
     _select_inspect_room(room_id)
     _clear_inspect_action_mode(buffer, room_id)
     _highlight_inspect_message(room_id)
+    _position_current_inspect_message(buffer, room_id, 0)
     _update_inspect_bar()
 
 
@@ -857,16 +860,21 @@ def _inspect_step(buffer: str, direction: int) -> None:
     _select_inspect_room(room_id)
     _clear_inspect_action_mode(buffer, room_id)
     messages = ROOM_MESSAGES.get(room_id, [])
+    moved = False
+    selected_message = None
     if messages:
         index = ROOM_INSPECT_INDEX.get(room_id, len(messages) - 1)
-        ROOM_INSPECT_INDEX[room_id] = max(
+        next_index = max(
             0,
             min(len(messages) - 1, index + direction),
         )
+        ROOM_INSPECT_INDEX[room_id] = next_index
+        moved = next_index != index
+        selected_message = messages[next_index]
         _log(
             "inspect selection changed: "
             f"room_id={_redacted_text(room_id)} previous={index} "
-            f"current={ROOM_INSPECT_INDEX[room_id]} count={len(messages)}"
+            f"current={next_index} count={len(messages)} moved={moved}"
         )
     else:
         _log(
@@ -874,6 +882,8 @@ def _inspect_step(buffer: str, direction: int) -> None:
             f"room_id={_redacted_text(room_id)}"
         )
     _highlight_inspect_message(room_id)
+    if moved and selected_message is not None:
+        _position_inspect_window(buffer, selected_message, direction)
     _update_inspect_bar()
 
 
@@ -920,6 +930,223 @@ def _inspect_key_step(buffer: str, direction: int) -> None:
         return
 
     _inspect_step(buffer, direction)
+
+
+def _position_current_inspect_message(
+    buffer: str,
+    room_id: str,
+    direction: int,
+) -> None:
+    current = _current_inspect_message(room_id)
+    if current is None:
+        return
+    _position_inspect_window(buffer, current[1], direction)
+
+
+def _position_inspect_window(
+    buffer: str,
+    message: dict[str, Any],
+    direction: int,
+) -> None:
+    line = str(message.get("line") or "")
+    if not line:
+        _log("inspect window position unavailable; message has no line pointer")
+        _page_inspect_window(buffer, direction)
+        return
+
+    required = ("window_search_with_buffer", "window_get_integer", "hdata_update")
+    missing = [name for name in required if not hasattr(weechat, name)]
+    if missing:
+        _log(
+            "inspect window position unavailable; missing WeeChat APIs: "
+            + ",".join(missing)
+        )
+        _page_inspect_window(buffer, direction)
+        return
+
+    try:
+        window = str(weechat.window_search_with_buffer(buffer) or "")
+    except Exception as exc:
+        _log(f"inspect window lookup failed: buffer={buffer} error={exc}")
+        _page_inspect_window(buffer, direction)
+        return
+    if not window:
+        _log(f"inspect window position unavailable; no window for buffer={buffer}")
+        _page_inspect_window(buffer, direction)
+        return
+
+    scroll = _window_scroll_pointer(window)
+    if not scroll:
+        _log(f"inspect window position unavailable; no scroll pointer window={window}")
+        _page_inspect_window(buffer, direction)
+        return
+
+    height = _window_chat_height(window)
+    start_line = _effective_window_start_line(buffer, scroll, height)
+    if start_line and _line_is_visible(start_line, line, height):
+        _log(
+            "inspect window already contains selected line: "
+            f"buffer={buffer} window={window} selected_line={line} "
+            f"start_line={start_line} height={height}"
+        )
+        return
+
+    next_start_line = _scroll_start_for_selection(
+        start_line,
+        line,
+        direction,
+        height,
+    )
+    values = {
+        "start_line": next_start_line,
+        "start_line_pos": "0",
+        "scrolling": "1",
+    }
+    try:
+        updated = weechat.hdata_update(
+            weechat.hdata_get("window_scroll"),
+            scroll,
+            values,
+        )
+    except Exception as exc:
+        _log(
+            "inspect window position update failed: "
+            f"window={window} scroll={scroll} error={exc}"
+        )
+        _page_inspect_window(buffer, direction)
+        return
+    if not updated:
+        _log(
+            "inspect window position update was ignored: "
+            f"window={window} scroll={scroll}"
+        )
+        _page_inspect_window(buffer, direction)
+        return
+
+    _log(
+        "inspect window positioned: "
+        f"buffer={buffer} window={window} selected_line={line} "
+        f"previous_start_line={start_line} start_line={next_start_line} "
+        f"height={height} direction={direction}"
+    )
+    weechat.command(buffer, "/window refresh")
+
+
+def _page_inspect_window(buffer: str, direction: int) -> None:
+    if direction == 0:
+        _log(f"inspect window page fallback skipped: buffer={buffer} direction=0")
+        return
+    command = "/window page_up" if direction < 0 else "/window page_down"
+    _log(f"paging inspect window: buffer={buffer} command={command}")
+    weechat.command(buffer, command)
+
+
+def _window_scroll_pointer(window: str) -> str:
+    if hasattr(weechat, "window_get_pointer"):
+        try:
+            scroll = str(weechat.window_get_pointer(window, "scroll") or "")
+            if scroll:
+                return scroll
+        except Exception as exc:
+            _log(
+                "window_get_pointer scroll lookup failed: "
+                f"window={window} error={exc}"
+            )
+
+    if not hasattr(weechat, "hdata_pointer"):
+        return ""
+
+    try:
+        return str(
+            weechat.hdata_pointer(
+                weechat.hdata_get("window"),
+                window,
+                "scroll",
+            )
+            or ""
+        )
+    except Exception as exc:
+        _log(f"hdata scroll lookup failed: window={window} error={exc}")
+        return ""
+
+
+def _window_chat_height(window: str) -> int:
+    try:
+        height = int(weechat.window_get_integer(window, "win_chat_height") or 0)
+    except Exception as exc:
+        _log(f"window height lookup failed: window={window} error={exc}")
+        return 1
+    return max(1, height)
+
+
+def _window_scroll_start_line(scroll: str) -> str:
+    if not scroll or not hasattr(weechat, "hdata_pointer"):
+        return ""
+    try:
+        return str(
+            weechat.hdata_pointer(
+                weechat.hdata_get("window_scroll"),
+                scroll,
+                "start_line",
+            )
+            or ""
+        )
+    except Exception as exc:
+        _log(f"window scroll start lookup failed: scroll={scroll} error={exc}")
+        return ""
+
+
+def _effective_window_start_line(buffer: str, scroll: str, height: int) -> str:
+    start_line = _window_scroll_start_line(scroll)
+    if start_line:
+        return start_line
+
+    last_line = _last_buffer_line(buffer)
+    if not last_line:
+        return ""
+    return _previous_line(last_line, max(0, height - 1)) or last_line
+
+
+def _line_is_visible(start_line: str, target_line: str, height: int) -> bool:
+    current = start_line
+    for _ in range(max(1, height)):
+        if current == target_line:
+            return True
+        current = _line_pointer(current, "next_line")
+        if not current:
+            break
+    return False
+
+
+def _scroll_start_for_selection(
+    start_line: str,
+    selected_line: str,
+    direction: int,
+    height: int,
+) -> str:
+    if direction > 0 or (not start_line and direction == 0):
+        return _previous_line(selected_line, max(0, height - 1)) or selected_line
+    return selected_line
+
+
+def _previous_line(line: str, count: int) -> str:
+    current = line
+    for _ in range(count):
+        previous = _line_pointer(current, "prev_line")
+        if not previous:
+            break
+        current = previous
+    return current
+
+
+def _line_pointer(line: str, name: str) -> str:
+    if not line or not hasattr(weechat, "hdata_pointer"):
+        return ""
+    try:
+        return str(weechat.hdata_pointer(weechat.hdata_get("line"), line, name) or "")
+    except Exception as exc:
+        _log(f"line pointer lookup failed: line={line} name={name} error={exc}")
+        return ""
 
 
 def _inspect_enter(buffer: str) -> None:
@@ -1320,36 +1547,52 @@ def _update_message_line(message: dict[str, Any], *, selected: bool) -> bool:
 
 
 def _last_printed_line_data(buffer: str) -> str:
+    return _last_printed_line_refs(buffer)[1]
+
+
+def _last_printed_line_refs(buffer: str) -> tuple[str, str]:
     for name in ("own_lines", "lines"):
-        line_data = _last_printed_line_data_from_lines(buffer, name)
+        line, line_data = _last_printed_line_refs_from_lines(buffer, name)
         if line_data:
             _log(f"last printed line data found: buffer={buffer} source={name}")
-            return line_data
+            return line, line_data
     _log(f"last printed line data not found: buffer={buffer}")
+    return "", ""
+
+
+def _last_buffer_line(buffer: str) -> str:
+    for name in ("own_lines", "lines"):
+        line, _line_data = _last_printed_line_refs_from_lines(buffer, name)
+        if line:
+            return line
     return ""
 
 
-def _last_printed_line_data_from_lines(buffer: str, lines_name: str) -> str:
+def _last_printed_line_refs_from_lines(
+    buffer: str,
+    lines_name: str,
+) -> tuple[str, str]:
     if not hasattr(weechat, "hdata_pointer"):
         _log("hdata_pointer unavailable while looking up last printed line")
-        return ""
+        return "", ""
 
     try:
         lines = weechat.hdata_pointer(weechat.hdata_get("buffer"), buffer, lines_name)
         if not lines:
             _log(f"no WeeChat lines pointer: buffer={buffer} source={lines_name}")
-            return ""
+            return "", ""
         line = weechat.hdata_pointer(weechat.hdata_get("lines"), lines, "last_line")
         if not line:
             _log(f"no last_line pointer: buffer={buffer} source={lines_name}")
-            return ""
-        return str(weechat.hdata_pointer(weechat.hdata_get("line"), line, "data"))
+            return "", ""
+        line_data = weechat.hdata_pointer(weechat.hdata_get("line"), line, "data")
+        return str(line), str(line_data or "")
     except Exception as exc:
         _log(
             "failed looking up last printed line data: "
             f"buffer={buffer} source={lines_name} error={exc}"
         )
-        return ""
+        return "", ""
 
 
 def _ensure_inspect_bar() -> None:

@@ -24,6 +24,10 @@ class FakeWeechat:
         self.line_updates = []
         self.last_line_by_lines = {}
         self.line_data_by_line = {}
+        self.line_prev_by_line = {}
+        self.line_next_by_line = {}
+        self.scroll_updates = []
+        self.scroll_values = {"scroll": {}}
         self.buffer_strings = {}
         self.buffer_inputs = {}
         self.hook_sets = []
@@ -86,6 +90,11 @@ class FakeWeechat:
         prefix, _separator, body = message.partition("\t")
         self.line_data[line_data] = {"prefix": prefix, "message": body}
         self.line_data_by_line[line] = line_data
+        previous_line = self.last_line_by_lines.get(f"lines:{buffer}", "")
+        self.line_prev_by_line[line] = previous_line
+        self.line_next_by_line[line] = ""
+        if previous_line:
+            self.line_next_by_line[previous_line] = line
         self.last_line_by_lines[f"lines:{buffer}"] = line
 
     def bar_item_new(self, name, callback, data):
@@ -121,14 +130,39 @@ class FakeWeechat:
             return self.last_line_by_lines.get(pointer, "")
         if hdata == "line" and name == "data":
             return self.line_data_by_line.get(pointer, "")
+        if hdata == "line" and name == "prev_line":
+            return self.line_prev_by_line.get(pointer, "")
+        if hdata == "line" and name == "next_line":
+            return self.line_next_by_line.get(pointer, "")
+        if hdata == "window" and name == "scroll":
+            return "scroll"
+        if hdata == "window_scroll" and name == "start_line":
+            return self.scroll_values.get(pointer, {}).get("start_line", "")
         return ""
 
     def hdata_update(self, hdata, pointer, values):
+        if hdata == "window_scroll" and pointer == "scroll":
+            self.scroll_updates.append((pointer, values))
+            self.scroll_values.setdefault(pointer, {}).update(values)
+            return len(values)
         if hdata != "line_data" or pointer not in self.line_data:
             return 0
         self.line_updates.append((pointer, values))
         self.line_data[pointer].update(values)
         return len(values)
+
+    def window_search_with_buffer(self, buffer):
+        return f"window:{buffer}"
+
+    def window_get_integer(self, window, name):
+        if window.startswith("window:") and name == "win_chat_height":
+            return 5
+        return 0
+
+    def window_get_pointer(self, window, name):
+        if window.startswith("window:") and name == "scroll":
+            return "scroll"
+        return ""
 
     def hook_process_hashtable(self, command, options, timeout, callback, data):
         self.process_calls.append((command, options, timeout, callback, data))
@@ -409,6 +443,7 @@ def test_inspect_navigation_moves_cursor_before_enter(fresh_meechat):
     }
     assert fake.line_data["line-data-1"]["prefix"].startswith("<reverse>>> ")
     assert fake.line_data["line-data-1"]["message"] == "<reverse>first<reset>"
+    assert fake.scroll_updates == []
 
     meechat.command_cb("", "buffer", "inspect-enter")
 
@@ -426,6 +461,52 @@ def test_inspect_navigation_moves_cursor_before_enter(fresh_meechat):
     }
     rendered = meechat.inspect_bar_item_cb("", "", "", "buffer", {})
     assert rendered == ""
+
+
+def test_inspect_navigation_scrolls_only_when_selection_leaves_view(fresh_meechat):
+    fake = fresh_meechat
+    for index in range(1, 7):
+        meechat._print_matrix_message(
+            {
+                "room_id": "!room:example",
+                "room_name": "General",
+                "sender": "@alice:example",
+                "sender_display_name": "Alice",
+                "body": f"message {index}",
+                "event_id": f"${index}",
+                "server_timestamp": 123000,
+            }
+        )
+
+    meechat.command_cb("", "buffer", "inspect")
+
+    assert fake.scroll_updates == []
+
+    for _ in range(4):
+        meechat.command_cb("", "buffer", "inspect-prev")
+
+    assert fake.scroll_updates == []
+
+    meechat.command_cb("", "buffer", "inspect-prev")
+
+    assert fake.scroll_updates[-1] == (
+        "scroll",
+        {"start_line": "line-1", "start_line_pos": "0", "scrolling": "1"},
+    )
+
+    for _ in range(4):
+        meechat.command_cb("", "buffer", "inspect-next")
+
+    assert len(fake.scroll_updates) == 1
+
+    meechat.command_cb("", "buffer", "inspect-next")
+
+    assert fake.scroll_updates[-1] == (
+        "scroll",
+        {"start_line": "line-2", "start_line_pos": "0", "scrolling": "1"},
+    )
+    assert ("buffer", "/window page_up") not in fake.commands
+    assert ("buffer", "/window page_down") not in fake.commands
 
 
 def test_ctrl_g_toggles_monitor_and_selector(fresh_meechat):
@@ -561,6 +642,7 @@ def test_inspect_enter_menu_completes_edit_action(monkeypatch, fresh_meechat):
 
 
 def test_inspect_action_menu_uses_arrow_selection(fresh_meechat):
+    fake = fresh_meechat
     meechat._print_matrix_message(
         {
             "room_id": "!room:example",
@@ -575,11 +657,13 @@ def test_inspect_action_menu_uses_arrow_selection(fresh_meechat):
 
     meechat.command_cb("", "buffer", "inspect")
     meechat.command_cb("", "buffer", "inspect-enter")
+    scroll_count = len(fake.scroll_updates)
     meechat.command_cb("", "buffer", "inspect-down")
     meechat.command_cb("", "buffer", "inspect-enter")
 
     assert meechat.INSPECT_ACTION_STATE["!room:example"]["action"] == "thread"
     assert "action: thread" in meechat.inspect_bar_item_cb("", "", "", "buffer", {})
+    assert len(fake.scroll_updates) == scroll_count
 
 
 def test_room_buffer_binds_inspect_navigation_and_creates_top_monitor(fresh_meechat):
