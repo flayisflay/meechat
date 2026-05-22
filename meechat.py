@@ -74,6 +74,7 @@ ROOM_TOPICS: dict[str, str] = {}
 ROOM_MESSAGES: dict[str, list[dict[str, Any]]] = {}
 ROOM_INSPECT_INDEX: dict[str, int] = {}
 ROOM_READ_RECEIPTS: dict[str, dict[str, dict[str, Any]]] = {}
+ROOM_REACTIONS: dict[str, dict[str, dict[str, dict[str, Any]]]] = {}
 ROOM_HIGHLIGHTED_INDEX: dict[str, int] = {}
 INSPECT_ACTION_STATE: dict[str, dict[str, Any]] = {}
 INSPECT_ACTIVE_ROOMS: set[str] = set()
@@ -461,6 +462,10 @@ def _handle_worker_message(message: dict[str, Any]) -> None:
         _record_read_receipts(message)
         return
 
+    if message_type == "reaction":
+        _record_reaction(message)
+        return
+
     if message_type == "send_ok":
         _log(f"message send confirmed; event_id={message.get('event_id', '')}")
         return
@@ -781,6 +786,44 @@ def _record_read_receipts(message: dict[str, Any]) -> None:
         "recorded read receipts: "
         f"room_id={_redacted_text(room_id)} count={receipt_count} "
         f"room_receipt_users={len(room_receipts)}"
+    )
+    _update_inspect_bar()
+
+
+def _record_reaction(message: dict[str, Any]) -> None:
+    room_id = str(message.get("room_id") or "")
+    target_event_id = str(message.get("target_event_id") or "")
+    reaction_event_id = str(message.get("event_id") or "")
+    key = str(message.get("key") or "")
+    sender = str(message.get("sender") or "")
+    if not room_id or not target_event_id or not key or not sender:
+        _log(
+            "ignoring incomplete reaction: "
+            f"room_id={_redacted_text(room_id)} "
+            f"target_event_id={_redacted_text(target_event_id)} "
+            f"event_id={_redacted_text(reaction_event_id)} "
+            f"key_present={bool(key)} sender_present={bool(sender)}"
+        )
+        return
+
+    reaction_key = reaction_event_id or f"{sender}:{key}"
+    room_reactions = ROOM_REACTIONS.setdefault(room_id, {})
+    message_reactions = room_reactions.setdefault(target_event_id, {})
+    message_reactions[reaction_key] = {
+        "event_id": reaction_event_id,
+        "target_event_id": target_event_id,
+        "key": key,
+        "sender": sender,
+        "sender_display_name": str(message.get("sender_display_name") or sender),
+        "timestamp": int(message.get("server_timestamp") or 0),
+    }
+    _log(
+        "recorded reaction: "
+        f"room_id={_redacted_text(room_id)} "
+        f"target_event_id={_redacted_text(target_event_id)} "
+        f"event_id={_redacted_text(reaction_event_id)} key={key!r} "
+        f"sender={_redacted_text(sender)} "
+        f"message_reaction_count={len(message_reactions)}"
     )
     _update_inspect_bar()
 
@@ -1742,6 +1785,7 @@ def _inspect_text(room_id: str) -> str:
         return "\n".join(
             [
                 "message: none",
+                "reactions:",
                 "read receipts:",
             ]
         )
@@ -1768,6 +1812,7 @@ def _inspect_text(room_id: str) -> str:
     if event_id:
         lines.append(f"event: {event_id}")
     lines.append(f"body: {body}")
+    lines.append("reactions: " + _format_reactions(room_id, event_id))
     lines.append("read receipts: " + _format_read_receipts(receipts))
     lines.extend(_inspect_action_lines(room_id))
     return "\n".join(lines)
@@ -1840,6 +1885,40 @@ def _format_read_receipts(receipts: list[dict[str, Any]]) -> str:
     return " ".join(
         _colored_receipt_label(str(receipt.get("display_name") or ""))
         for receipt in receipts
+    )
+
+
+def _format_reactions(room_id: str, event_id: str) -> str:
+    reactions = ROOM_REACTIONS.get(room_id, {}).get(event_id, {})
+    if not reactions:
+        return ""
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for reaction in reactions.values():
+        grouped.setdefault(str(reaction.get("key") or ""), []).append(reaction)
+
+    parts = []
+    for key, group in sorted(grouped.items(), key=_reaction_group_sort_key):
+        if not key:
+            continue
+        names = ", ".join(
+            _colored_nick(str(reaction.get("sender_display_name") or ""))
+            for reaction in sorted(group, key=_reaction_sort_key)
+        )
+        parts.append(f"{key} x{len(group)} by {names}")
+    return " | ".join(parts)
+
+
+def _reaction_group_sort_key(item: tuple[str, list[dict[str, Any]]]) -> tuple[int, str]:
+    key, group = item
+    first_timestamp = min(int(reaction.get("timestamp") or 0) for reaction in group)
+    return first_timestamp, key
+
+
+def _reaction_sort_key(reaction: dict[str, Any]) -> tuple[int, str]:
+    return (
+        int(reaction.get("timestamp") or 0),
+        str(reaction.get("sender_display_name") or reaction.get("sender") or ""),
     )
 
 
@@ -1984,6 +2063,7 @@ def room_close_cb(data: str, buffer: str) -> int:
         ROOM_MESSAGES.pop(room_id, None)
         ROOM_INSPECT_INDEX.pop(room_id, None)
         ROOM_READ_RECEIPTS.pop(room_id, None)
+        ROOM_REACTIONS.pop(room_id, None)
         ROOM_TOPICS.pop(room_id, None)
         INSPECT_ACTIVE_ROOMS.discard(room_id)
         INSPECT_ACTION_STATE.pop(room_id, None)

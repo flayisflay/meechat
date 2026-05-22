@@ -206,6 +206,7 @@ def fresh_meechat(monkeypatch):
         ("ROOM_MESSAGES", {}),
         ("ROOM_INSPECT_INDEX", {}),
         ("ROOM_READ_RECEIPTS", {}),
+        ("ROOM_REACTIONS", {}),
         ("ROOM_HIGHLIGHTED_INDEX", {}),
         ("INSPECT_ACTION_STATE", {}),
         ("INSPECT_ACTIVE_ROOMS", set()),
@@ -349,7 +350,7 @@ def test_inspect_monitor_steps_through_room_messages(fresh_meechat):
     assert "body: second" in rendered
     assert "read receipts:" in rendered
     assert "enter: select message" in rendered
-    assert "actions:" not in rendered
+    assert "\nactions:" not in rendered
 
     meechat.command_cb("", "buffer", "inspect-prev")
 
@@ -407,6 +408,51 @@ def test_inspect_monitor_shows_colored_read_receipts(fresh_meechat):
     assert "read receipts: <red>Bea<reset> <red>Cha<reset>" in rendered
 
 
+def test_inspect_monitor_shows_reactions_with_counts_and_senders(fresh_meechat):
+    for event_id, body in (("$one", "first"), ("$two", "second")):
+        meechat._print_matrix_message(
+            {
+                "room_id": "!room:example",
+                "room_name": "General",
+                "sender": "@alice:example",
+                "sender_display_name": "Alice",
+                "body": body,
+                "event_id": event_id,
+                "server_timestamp": 123000,
+            }
+        )
+
+    for event_id, key, sender, display_name, timestamp in (
+        ("$react1", "👍", "@beatrice:example", "Beatrice", 124000),
+        ("$react2", "👍", "@charlie:example", "Charlie", 125000),
+        ("$react3", "❤️", "@dana:example", "Dana", 126000),
+    ):
+        meechat._record_reaction(
+            {
+                "room_id": "!room:example",
+                "event_id": event_id,
+                "target_event_id": "$two",
+                "key": key,
+                "sender": sender,
+                "sender_display_name": display_name,
+                "server_timestamp": timestamp,
+            }
+        )
+
+    meechat.command_cb("", "buffer", "inspect")
+
+    rendered = meechat.inspect_bar_item_cb("", "", "", "buffer", {})
+    assert (
+        "reactions: 👍 x2 by <red>Beatrice<reset>, <red>Charlie<reset> | "
+        "❤️ x1 by <red>Dana<reset>"
+    ) in rendered
+
+    meechat.command_cb("", "buffer", "inspect-prev")
+
+    rendered = meechat.inspect_bar_item_cb("", "", "", "buffer", {})
+    assert "reactions: \n" in rendered
+
+
 def test_inspect_navigation_moves_cursor_before_enter(fresh_meechat):
     fake = fresh_meechat
     for event_id, sender, body in (
@@ -433,7 +479,7 @@ def test_inspect_navigation_moves_cursor_before_enter(fresh_meechat):
     assert fake.line_data["line-data-2"]["message"] == "<reverse>second<reset>"
     rendered = meechat.inspect_bar_item_cb("", "", "", "buffer", {})
     assert "enter: select message" in rendered
-    assert "actions:" not in rendered
+    assert "\nactions:" not in rendered
 
     meechat.command_cb("", "buffer", "inspect-prev")
 

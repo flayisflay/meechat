@@ -329,6 +329,10 @@ class MatrixWorker:
                 from nio import RoomTopicEvent
             except ImportError:
                 RoomTopicEvent = None  # type: ignore[assignment]
+            try:
+                from nio import ReactionEvent
+            except ImportError:
+                ReactionEvent = None  # type: ignore[assignment]
             self.log("matrix-nio import succeeded")
         except ModuleNotFoundError:
             self.log("matrix-nio import failed; module is not installed")
@@ -419,6 +423,11 @@ class MatrixWorker:
             self.log("room topic event callback registered")
         else:
             self.log("room topic event callback unavailable in this nio version")
+        if ReactionEvent is not None:
+            self.client.add_event_callback(self.on_reaction, ReactionEvent)
+            self.log("reaction event callback registered")
+        else:
+            self.log("reaction event callback unavailable in this nio version")
         add_ephemeral_callback = getattr(self.client, "add_ephemeral_callback", None)
         if add_ephemeral_callback is not None:
             add_ephemeral_callback(self.on_receipt, ReceiptEvent)
@@ -646,6 +655,40 @@ class MatrixWorker:
                 "receipt event produced no public read receipts: "
                 f"room_id={_redacted_text(room_id)} skipped={skipped}"
             )
+
+    async def on_reaction(self, room: Any, event: Any) -> None:
+        room_id = getattr(room, "room_id", "")
+        target_event_id = str(getattr(event, "reacts_to", "") or "")
+        key = str(getattr(event, "key", "") or "")
+        sender = str(getattr(event, "sender", "") or "")
+        if not room_id or not target_event_id or not key or not sender:
+            self.log(
+                "reaction event skipped: "
+                f"room_id_present={bool(room_id)} "
+                f"target_present={bool(target_event_id)} key_present={bool(key)} "
+                f"sender_present={bool(sender)}"
+            )
+            return
+
+        self.log(
+            "reaction event emitting: "
+            f"room_id={_redacted_text(room_id)} "
+            f"target_event_id={_redacted_text(target_event_id)} "
+            f"event_id={_redacted_text(getattr(event, 'event_id', ''))} "
+            f"sender={_redacted_text(sender)} key={key!r}"
+        )
+        await self.emit(
+            {
+                "type": "reaction",
+                "room_id": room_id,
+                "event_id": getattr(event, "event_id", ""),
+                "target_event_id": target_event_id,
+                "key": key,
+                "sender": sender,
+                "sender_display_name": _sender_display_name(room, sender),
+                "server_timestamp": getattr(event, "server_timestamp", 0),
+            }
+        )
 
     async def send_message(self, room_id: str, body: str) -> None:
         self.log(

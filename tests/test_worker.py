@@ -198,6 +198,7 @@ def test_connect_logs_in_with_password(monkeypatch):
         fake_nio = SimpleNamespace(
             AsyncClient=FakeClient,
             AsyncClientConfig=FakeClientConfig,
+            ReactionEvent=object,
             ReceiptEvent=object,
             RoomMessageText=object,
             RoomTopicEvent=object,
@@ -391,6 +392,40 @@ def test_on_receipt_emits_display_names_for_public_read_receipts():
                     "timestamp": 123000,
                 }
             ],
+        }
+
+    asyncio.run(run_test())
+
+
+def test_on_reaction_emits_reaction_details():
+    async def run_test():
+        users = {"@bob:example": SimpleNamespace(display_name="Bob")}
+        room = SimpleNamespace(
+            room_id="!room:example",
+            display_name="General",
+            users=users,
+        )
+        event = SimpleNamespace(
+            event_id="$reaction",
+            reacts_to="$event",
+            key="👍",
+            sender="@bob:example",
+            server_timestamp=124000,
+        )
+        stdout = io.StringIO()
+        worker = MatrixWorker(stdout=stdout)
+
+        await worker.on_reaction(room, event)
+
+        assert loads(stdout.getvalue()) == {
+            "type": "reaction",
+            "room_id": "!room:example",
+            "event_id": "$reaction",
+            "target_event_id": "$event",
+            "key": "👍",
+            "sender": "@bob:example",
+            "sender_display_name": "Bob",
+            "server_timestamp": 124000,
         }
 
     asyncio.run(run_test())
