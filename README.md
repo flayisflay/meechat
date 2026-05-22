@@ -22,11 +22,16 @@ Install the WeeChat script for autoload on startup:
 
 ```sh
 mkdir -p ~/.config/weechat/python/autoload
-ln -s "$(pwd)/meechat.py" ~/.config/weechat/python/autoload/meechat.py
+ln -sf /absolute/path/to/meechat/meechat.py ~/.config/weechat/python/autoload/meechat.py
 ```
 
 Use `~/.weechat/python/autoload` instead if your WeeChat config directory is
-`~/.weechat`.
+`~/.weechat`:
+
+```sh
+mkdir -p ~/.weechat/python/autoload
+ln -sf /absolute/path/to/meechat/meechat.py ~/.weechat/python/autoload/meechat.py
+```
 
 If using a virtualenv, point the worker at that Python:
 
@@ -58,6 +63,13 @@ After changing `meechat.py`, reload it from WeeChat:
 
 ```text
 /python reload meechat
+```
+
+Confirm MeeChat is loaded and connected:
+
+```text
+/python list
+/meechat status
 ```
 
 ## Configure
@@ -101,6 +113,15 @@ how much history is requested per room with:
 /set plugins.var.python.meechat.backlog_limit "100"
 ```
 
+To connect automatically when WeeChat starts and autoloads MeeChat:
+
+```text
+/set plugins.var.python.meechat.autoconnect on
+```
+
+With `autoconnect` enabled, WeeChat loads `meechat.py` from `python/autoload` at
+startup, then MeeChat runs `/meechat connect` automatically.
+
 If `/meechat connect` reports `M_UNKNOWN_TOKEN` while `auth` is `token`, the
 homeserver rejected the configured access token. If it happens while `auth` is
 `password`, the homeserver rejected the token returned by the password login
@@ -128,13 +149,14 @@ Common commands:
 /meechat disconnect
 ```
 
-`/meechat inspect` shows the top `meechat_inspect` monitor bar for the current
-Matrix room. MeeChat room buffers bind `Up`/`Down` and `Alt+Shift+Up`/
-`Alt+Shift+Down` to inspect older and newer messages in that top monitor.
+`Ctrl+G` toggles the top `meechat_inspect` monitor bar and message selector for
+the current Matrix room. While the selector is active, `Up`/`Down` and
+`Alt+Shift+Up`/`Alt+Shift+Down` inspect older and newer messages in that monitor.
 Press `Enter` on an empty input line to open actions for the selected message:
 reply, reply in thread, edit, add reaction, remove, and permalink. Select with
 the action letter or arrow keys, press `Enter`, then complete the prompted input.
-`Esc` or `Ctrl+G` cancels action mode and clears the message marker.
+`Ctrl+G` again exits inspect mode and clears the message marker; `Esc` also exits
+inspect mode.
 
 MeeChat also adds a `meechat_topic` title bar below the monitor using WeeChat's
 `buffer_title` item, populated only with the room topic and using a dark blue

@@ -76,11 +76,21 @@ ROOM_INSPECT_INDEX: dict[str, int] = {}
 ROOM_READ_RECEIPTS: dict[str, dict[str, dict[str, Any]]] = {}
 ROOM_HIGHLIGHTED_INDEX: dict[str, int] = {}
 INSPECT_ACTION_STATE: dict[str, dict[str, Any]] = {}
+INSPECT_ACTIVE_ROOMS: set[str] = set()
 INSPECT_BAR_ITEM = ""
 INSPECT_BAR = ""
 TOPIC_BAR = ""
 INSPECT_HISTORY_LIMIT = 500
-INSPECT_CANCEL_KEYS = ("ctrl-[", "meta-[", "meta-ctrl-[", "ctrl-G")
+INSPECT_TOGGLE_KEY = "ctrl-G"
+INSPECT_CANCEL_KEYS = ("ctrl-[", "meta-[", "meta-ctrl-[")
+INSPECT_MODE_KEYS = {
+    "meta-shift-up": "/meechat inspect-prev",
+    "meta-shift-down": "/meechat inspect-next",
+    "up": "/meechat inspect-up",
+    "down": "/meechat inspect-down",
+    "ctrl-M": "/meechat inspect-enter",
+    **{key: "/meechat inspect-cancel" for key in INSPECT_CANCEL_KEYS},
+}
 INSPECT_ACTIONS = [
     {
         "key": "r",
@@ -571,19 +581,29 @@ def _update_room_buffer(
     weechat.buffer_set(buffer, "title", ROOM_TOPICS.get(room_id, ""))
     weechat.buffer_set(buffer, "localvar_set_type", "matrix")
     weechat.buffer_set(buffer, "localvar_set_meechat", "1")
+    weechat.buffer_set(
+        buffer,
+        "localvar_set_meechat_inspect",
+        "1" if room_id in INSPECT_ACTIVE_ROOMS else "0",
+    )
     weechat.buffer_set(buffer, "localvar_set_room_id", room_id)
-    weechat.buffer_set(buffer, "key_bind_meta-shift-up", "/meechat inspect-prev")
-    weechat.buffer_set(buffer, "key_bind_meta-shift-down", "/meechat inspect-next")
-    weechat.buffer_set(buffer, "key_bind_up", "/meechat inspect-up")
-    weechat.buffer_set(buffer, "key_bind_down", "/meechat inspect-down")
-    weechat.buffer_set(buffer, "key_bind_ctrl-M", "/meechat inspect-enter")
-    for key in INSPECT_CANCEL_KEYS:
-        weechat.buffer_set(buffer, "key_bind_" + key, "/meechat inspect-cancel")
+    weechat.buffer_set(
+        buffer,
+        "key_bind_" + INSPECT_TOGGLE_KEY,
+        "/meechat inspect-toggle",
+    )
+    _set_inspect_mode_keys(buffer, room_id in INSPECT_ACTIVE_ROOMS)
     _log(
         "room buffer updated: "
         f"buffer={buffer} short_name={short_name!r} "
         f"title_len={len(ROOM_TOPICS.get(room_id, ''))}"
     )
+
+
+def _set_inspect_mode_keys(buffer: str, enabled: bool) -> None:
+    _log(f"setting inspect mode key binds: buffer={buffer} enabled={enabled}")
+    for key, command in INSPECT_MODE_KEYS.items():
+        weechat.buffer_set(buffer, "key_bind_" + key, command)
 
 
 def _rehydrate_room_buffers() -> None:
@@ -735,6 +755,45 @@ def _record_read_receipts(message: dict[str, Any]) -> None:
     _update_inspect_bar()
 
 
+def _activate_inspect_mode(buffer: str, room_id: str) -> None:
+    _ensure_inspect_bar()
+    INSPECT_ACTIVE_ROOMS.add(room_id)
+    weechat.buffer_set(buffer, "localvar_set_meechat_inspect", "1")
+    _set_inspect_mode_keys(buffer, True)
+    _log(f"inspect mode activated: room_id={_redacted_text(room_id)} buffer={buffer}")
+
+
+def _exit_inspect_mode(buffer: str, room_id: str) -> None:
+    _log(f"inspect mode exit requested: room_id={_redacted_text(room_id)} buffer={buffer}")
+    INSPECT_ACTIVE_ROOMS.discard(room_id)
+    _clear_inspect_action_mode(buffer, room_id)
+    _set_inspect_mode_keys(buffer, False)
+    weechat.buffer_set(buffer, "localvar_set_meechat_inspect", "0")
+    _set_buffer_input(buffer, "")
+    _update_inspect_bar()
+
+
+def _toggle_inspect_mode(buffer: str) -> None:
+    room_id = _inspect_room_from_context(buffer)
+    _log(
+        "inspect toggle requested: "
+        f"buffer={buffer} room_id={_redacted_text(room_id)}"
+    )
+    if not room_id:
+        _log("inspect toggle rejected because buffer is not a Matrix room")
+        weechat.prnt(buffer, "meechat: inspect is only available in a Matrix room")
+        return
+
+    if (
+        room_id in INSPECT_ACTIVE_ROOMS
+        or room_id in INSPECT_ACTION_STATE
+        or room_id in ROOM_HIGHLIGHTED_INDEX
+    ):
+        _exit_inspect_mode(buffer, room_id)
+    else:
+        _show_inspect(buffer)
+
+
 def _show_inspect(buffer: str) -> None:
     room_id = _inspect_room_from_context(buffer)
     _log(
@@ -747,7 +806,7 @@ def _show_inspect(buffer: str) -> None:
         weechat.prnt(buffer, "meechat: inspect is only available in a Matrix room")
         return
 
-    _ensure_inspect_bar()
+    _activate_inspect_mode(buffer, room_id)
     _select_inspect_room(room_id)
     _clear_inspect_action_mode(buffer, room_id)
     _highlight_inspect_message(room_id)
@@ -766,7 +825,7 @@ def _inspect_step(buffer: str, direction: int) -> None:
         weechat.prnt(buffer, "meechat: inspect is only available in a Matrix room")
         return
 
-    _ensure_inspect_bar()
+    _activate_inspect_mode(buffer, room_id)
     _select_inspect_room(room_id)
     _clear_inspect_action_mode(buffer, room_id)
     messages = ROOM_MESSAGES.get(room_id, [])
@@ -798,6 +857,17 @@ def _inspect_key_step(buffer: str, direction: int) -> None:
     )
     if not room_id:
         _log("inspect key navigation ignored; buffer is not a Matrix room")
+        return
+
+    if room_id not in INSPECT_ACTIVE_ROOMS:
+        history_command = (
+            "/input history_previous" if direction < 0 else "/input history_next"
+        )
+        _log(
+            "inspect key navigation delegated because inspect mode is inactive: "
+            f"buffer={buffer} command={history_command}"
+        )
+        weechat.command(buffer, history_command)
         return
 
     state = INSPECT_ACTION_STATE.get(room_id, {})
@@ -834,6 +904,17 @@ def _inspect_enter(buffer: str) -> None:
         _log("inspect enter ignored; buffer is not a Matrix room")
         return
 
+    if room_id not in INSPECT_ACTIVE_ROOMS:
+        input_text = _buffer_input(buffer)
+        if input_text:
+            _set_buffer_input(buffer, "")
+            _log("inspect enter sending typed input while inspect mode is inactive")
+            room_input_cb("", buffer, input_text)
+        else:
+            _log("inspect enter delegated because inspect mode is inactive")
+            weechat.command(buffer, "/input return")
+        return
+
     state = INSPECT_ACTION_STATE.get(room_id, {})
     mode = str(state.get("mode") or "nav")
     input_text = _buffer_input(buffer)
@@ -868,15 +949,14 @@ def _inspect_cancel(buffer: str) -> None:
     if not room_id:
         return
 
-    action_mode_active = room_id in INSPECT_ACTION_STATE
-    cursor_active = room_id in ROOM_HIGHLIGHTED_INDEX
-    if action_mode_active or cursor_active:
-        _log(f"inspect selector cancelled: room_id={_redacted_text(room_id)}")
-        _clear_inspect_action_mode(buffer, room_id)
-        _set_buffer_input(buffer, "")
-        _update_inspect_bar()
+    if (
+        room_id in INSPECT_ACTIVE_ROOMS
+        or room_id in INSPECT_ACTION_STATE
+        or room_id in ROOM_HIGHLIGHTED_INDEX
+    ):
+        _exit_inspect_mode(buffer, room_id)
     else:
-        _log("inspect cancel ignored; selector is not active")
+        _log("inspect cancel ignored; inspect mode is not active")
 
 
 def _choose_inspect_action(buffer: str, key: str) -> None:
@@ -1049,7 +1129,10 @@ def _clear_inspect_action_mode(buffer: str, room_id: str) -> None:
 
 def _clear_all_inspect_action_modes() -> None:
     _log(f"clearing inspect action modes: count={len(INSPECT_ACTION_STATE)}")
-    for buffer in list(ROOM_BUFFERS.values()):
+    for room_id, buffer in list(ROOM_BUFFERS.items()):
+        INSPECT_ACTIVE_ROOMS.discard(room_id)
+        weechat.buffer_set(buffer, "localvar_set_meechat_inspect", "0")
+        _set_inspect_mode_keys(buffer, False)
         _set_inspect_action_keys(buffer, False)
     INSPECT_ACTION_STATE.clear()
 
@@ -1262,7 +1345,7 @@ def _ensure_inspect_bar() -> None:
             "off",
             "100",
             "window",
-            "${buffer.local_variables.type} == matrix",
+            "${buffer.local_variables.meechat_inspect} == 1",
             "top",
             "vertical",
             "vertical",
@@ -1332,7 +1415,7 @@ def inspect_bar_item_cb(
     extra_info: dict[str, str],
 ) -> str:
     room_id = BUFFER_ROOMS.get(buffer, "")
-    if not room_id:
+    if not room_id or room_id not in INSPECT_ACTIVE_ROOMS:
         return ""
     return _inspect_text(room_id)
 
@@ -1580,6 +1663,7 @@ def room_close_cb(data: str, buffer: str) -> int:
         ROOM_INSPECT_INDEX.pop(room_id, None)
         ROOM_READ_RECEIPTS.pop(room_id, None)
         ROOM_TOPICS.pop(room_id, None)
+        INSPECT_ACTIVE_ROOMS.discard(room_id)
         INSPECT_ACTION_STATE.pop(room_id, None)
         _update_inspect_bar()
         _log(
@@ -1633,14 +1717,19 @@ def command_cb(data: str, buffer: str, args: str) -> int:
         _show_inspect(buffer)
         return weechat.WEECHAT_RC_OK
 
+    if subcommand == "inspect-toggle":
+        _log("command dispatch: inspect-toggle")
+        _toggle_inspect_mode(buffer)
+        return weechat.WEECHAT_RC_OK
+
     if subcommand == "inspect-prev":
         _log("command dispatch: inspect-prev")
-        _inspect_step(buffer, -1)
+        _inspect_key_step(buffer, -1)
         return weechat.WEECHAT_RC_OK
 
     if subcommand == "inspect-next":
         _log("command dispatch: inspect-next")
-        _inspect_step(buffer, 1)
+        _inspect_key_step(buffer, 1)
         return weechat.WEECHAT_RC_OK
 
     if subcommand == "inspect-up":
@@ -1726,6 +1815,7 @@ def _print_help(buffer: str) -> None:
     weechat.prnt(buffer, "  /meechat disconnect")
     weechat.prnt(buffer, "  /meechat rooms")
     weechat.prnt(buffer, "  /meechat inspect")
+    weechat.prnt(buffer, "  /meechat inspect-toggle")
     weechat.prnt(buffer, "  /meechat inspect-prev")
     weechat.prnt(buffer, "  /meechat inspect-next")
     weechat.prnt(buffer, "  /meechat inspect-enter")
@@ -1763,12 +1853,14 @@ def _register() -> None:
     weechat.hook_command(
         "meechat",
         "Matrix client adapter",
-        "connect | disconnect | rooms | inspect | inspect-prev | inspect-next | inspect-enter | "
+        "connect | disconnect | rooms | inspect | inspect-toggle | inspect-prev | "
+        "inspect-next | inspect-enter | "
         "join <room> | leave [room-id] | set <option> <value> | status",
         "connect: connect to Matrix\n"
         "disconnect: stop the Matrix worker\n"
         "rooms: refresh joined room buffers\n"
         "inspect: show the message inspector monitor for the current Matrix room\n"
+        "inspect-toggle: toggle the message inspector monitor for this room\n"
         "inspect-prev: inspect the previous message in the current Matrix room\n"
         "inspect-next: inspect the next message in the current Matrix room\n"
         "inspect-enter: open or advance the selected message action menu\n"
@@ -1776,7 +1868,7 @@ def _register() -> None:
         "leave: leave the current room buffer or provided room ID\n"
         "set: set a MeeChat plugin option\n"
         "status: show worker status",
-        "connect || disconnect || rooms || inspect || inspect-prev || "
+        "connect || disconnect || rooms || inspect || inspect-toggle || inspect-prev || "
         "inspect-next || inspect-enter || join || leave || set || status",
         "command_cb",
         "",

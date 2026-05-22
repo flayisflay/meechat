@@ -167,6 +167,7 @@ def fresh_meechat(monkeypatch):
         ("ROOM_READ_RECEIPTS", {}),
         ("ROOM_HIGHLIGHTED_INDEX", {}),
         ("INSPECT_ACTION_STATE", {}),
+        ("INSPECT_ACTIVE_ROOMS", set()),
         ("INSPECT_BAR_ITEM", ""),
         ("INSPECT_BAR", ""),
         ("TOPIC_BAR", ""),
@@ -413,8 +414,82 @@ def test_inspect_navigation_moves_cursor_before_enter(fresh_meechat):
         "message": "first",
     }
     rendered = meechat.inspect_bar_item_cb("", "", "", "buffer", {})
-    assert "enter: select message" in rendered
-    assert "actions:" not in rendered
+    assert rendered == ""
+
+
+def test_ctrl_g_toggles_monitor_and_selector(fresh_meechat):
+    fake = fresh_meechat
+    meechat._print_matrix_message(
+        {
+            "room_id": "!room:example",
+            "room_name": "General",
+            "sender": "@alice:example",
+            "sender_display_name": "Alice",
+            "body": "hello",
+            "event_id": "$event",
+            "server_timestamp": 123000,
+        }
+    )
+
+    assert meechat.inspect_bar_item_cb("", "", "", "buffer", {}) == ""
+    assert meechat.INSPECT_ACTIVE_ROOMS == set()
+
+    meechat.command_cb("", "buffer", "inspect-toggle")
+
+    assert meechat.INSPECT_ACTIVE_ROOMS == {"!room:example"}
+    assert (
+        "buffer",
+        "localvar_set_meechat_inspect",
+        "1",
+    ) in fake.buffer_properties
+    assert fake.line_data["line-data-1"]["prefix"].startswith("<reverse>>> ")
+    assert "message: 1/1" in meechat.inspect_bar_item_cb("", "", "", "buffer", {})
+
+    meechat.command_cb("", "buffer", "inspect-toggle")
+
+    assert meechat.INSPECT_ACTIVE_ROOMS == set()
+    assert fake.line_data["line-data-1"] == {
+        "prefix": "<red>Alice<reset>",
+        "message": "hello",
+    }
+    assert (
+        "buffer",
+        "localvar_set_meechat_inspect",
+        "0",
+    ) in fake.buffer_properties
+    assert not [
+        name
+        for _buffer, name, _value in fake.buffer_properties
+        if name.startswith("key_unbind_")
+    ]
+    assert meechat.inspect_bar_item_cb("", "", "", "buffer", {}) == ""
+
+
+def test_inspect_keys_delegate_in_normal_mode(fresh_meechat):
+    fake = fresh_meechat
+    meechat._print_matrix_message(
+        {
+            "room_id": "!room:example",
+            "room_name": "General",
+            "sender": "@alice:example",
+            "sender_display_name": "Alice",
+            "body": "hello",
+            "event_id": "$event",
+            "server_timestamp": 123000,
+        }
+    )
+
+    meechat.command_cb("", "buffer", "inspect-up")
+    meechat.command_cb("", "buffer", "inspect-prev")
+    meechat.command_cb("", "buffer", "inspect-enter")
+
+    assert meechat.INSPECT_ACTIVE_ROOMS == set()
+    assert fake.commands == [
+        ("buffer", "/input history_previous"),
+        ("buffer", "/input history_previous"),
+        ("buffer", "/input return"),
+    ]
+    assert meechat.inspect_bar_item_cb("", "", "", "buffer", {}) == ""
 
 
 def test_inspect_enter_menu_completes_edit_action(monkeypatch, fresh_meechat):
@@ -536,6 +611,11 @@ def test_room_buffer_binds_inspect_navigation_and_creates_top_monitor(fresh_meec
         "key_bind_ctrl-M",
         "/meechat inspect-enter",
     ) in fake.buffer_properties
+    assert (
+        "buffer",
+        "key_bind_ctrl-G",
+        "/meechat inspect-toggle",
+    ) in fake.buffer_properties
     for key in meechat.INSPECT_CANCEL_KEYS:
         assert (
             "buffer",
@@ -568,6 +648,12 @@ def test_startup_rehydrates_existing_room_buffers(fresh_meechat):
     assert meechat.ROOM_NAMES["!room:example.org"] == "Test Room"
     assert meechat.ROOM_TOPICS["!room:example.org"] == "Room topic"
     assert ("buffer", "localvar_set_meechat", "1") in fake.buffer_properties
+    assert ("buffer", "localvar_set_meechat_inspect", "0") in fake.buffer_properties
+    assert (
+        "buffer",
+        "key_bind_ctrl-G",
+        "/meechat inspect-toggle",
+    ) in fake.buffer_properties
     for key in meechat.INSPECT_CANCEL_KEYS:
         assert (
             "buffer",
