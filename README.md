@@ -119,10 +119,17 @@ Common commands:
 
 ```text
 /meechat rooms
+/meechat inspect
+/meechat inspect-prev
+/meechat inspect-next
 /meechat join #room:example.org
 /meechat leave
 /meechat disconnect
 ```
+
+`/meechat inspect` shows the top `meechat_inspect` monitor bar for the current
+Matrix room. MeeChat room buffers bind `Alt+Shift+Up` and `Alt+Shift+Down` to
+inspect older and newer messages in that top monitor.
 
 Run tests:
 

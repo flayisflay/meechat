@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import time
 from typing import Any
 
 SCRIPT_NAME = "meechat"
@@ -68,6 +69,11 @@ WORKER_STDOUT = ""
 ROOM_BUFFERS: dict[str, str] = {}
 BUFFER_ROOMS: dict[str, str] = {}
 ROOM_NAMES: dict[str, str] = {}
+ROOM_MESSAGES: dict[str, list[dict[str, Any]]] = {}
+ROOM_INSPECT_INDEX: dict[str, int] = {}
+INSPECT_BAR_ITEM = ""
+INSPECT_BAR = ""
+INSPECT_HISTORY_LIMIT = 500
 
 
 def _option(name: str, *, expand: bool = False) -> str:
@@ -342,6 +348,8 @@ def _update_room_buffer(
     weechat.buffer_set(buffer, "title", f"Matrix: {name or room_id} ({room_id})")
     weechat.buffer_set(buffer, "localvar_set_type", "matrix")
     weechat.buffer_set(buffer, "localvar_set_room_id", room_id)
+    weechat.buffer_set(buffer, "key_bind_meta-shift-up", "/meechat inspect-prev")
+    weechat.buffer_set(buffer, "key_bind_meta-shift-down", "/meechat inspect-next")
 
 
 def _print_matrix_message(message: dict[str, Any]) -> None:
@@ -356,6 +364,17 @@ def _print_matrix_message(message: dict[str, Any]) -> None:
     body = str(message.get("body") or "")
     timestamp_ms = int(message.get("server_timestamp") or 0)
     timestamp = timestamp_ms // 1000 if timestamp_ms else 0
+    event_id = str(message.get("event_id") or "")
+    _record_room_message(
+        room_id,
+        {
+            "event_id": event_id,
+            "sender": sender,
+            "sender_display_name": sender_display_name,
+            "body": body,
+            "timestamp": timestamp,
+        },
+    )
     tags = "notify_message"
     if sender:
         tags += ",nick_" + sender
@@ -365,6 +384,179 @@ def _print_matrix_message(message: dict[str, Any]) -> None:
         tags,
         f"{_colored_nick(sender_display_name)}\t{body}",
     )
+
+
+def _record_room_message(room_id: str, message: dict[str, Any]) -> None:
+    messages = ROOM_MESSAGES.setdefault(room_id, [])
+    selected = ROOM_INSPECT_INDEX.get(room_id)
+    was_at_end = selected is None or selected >= len(messages) - 1
+
+    messages.append(message)
+    if len(messages) > INSPECT_HISTORY_LIMIT:
+        overflow = len(messages) - INSPECT_HISTORY_LIMIT
+        del messages[:overflow]
+        if selected is not None:
+            ROOM_INSPECT_INDEX[room_id] = max(0, selected - overflow)
+
+    if was_at_end or room_id not in ROOM_INSPECT_INDEX:
+        ROOM_INSPECT_INDEX[room_id] = len(messages) - 1
+
+    _update_inspect_bar()
+
+
+def _show_inspect(buffer: str) -> None:
+    room_id = _inspect_room_from_context(buffer)
+    if not room_id:
+        weechat.prnt(buffer, "meechat: inspect is only available in a Matrix room")
+        return
+
+    _ensure_inspect_bar()
+    _select_inspect_room(room_id)
+    _update_inspect_bar()
+
+
+def _inspect_step(buffer: str, direction: int) -> None:
+    room_id = _inspect_room_from_context(buffer)
+    if not room_id:
+        weechat.prnt(buffer, "meechat: inspect is only available in a Matrix room")
+        return
+
+    _ensure_inspect_bar()
+    _select_inspect_room(room_id)
+    messages = ROOM_MESSAGES.get(room_id, [])
+    if messages:
+        index = ROOM_INSPECT_INDEX.get(room_id, len(messages) - 1)
+        ROOM_INSPECT_INDEX[room_id] = max(
+            0,
+            min(len(messages) - 1, index + direction),
+        )
+    _update_inspect_bar()
+
+
+def _inspect_room_from_context(buffer: str) -> str:
+    return BUFFER_ROOMS.get(buffer, "")
+
+
+def _select_inspect_room(room_id: str) -> None:
+    messages = ROOM_MESSAGES.get(room_id, [])
+    if messages and room_id not in ROOM_INSPECT_INDEX:
+        ROOM_INSPECT_INDEX[room_id] = len(messages) - 1
+
+
+def _ensure_inspect_bar() -> None:
+    global INSPECT_BAR, INSPECT_BAR_ITEM
+
+    if not INSPECT_BAR_ITEM:
+        INSPECT_BAR_ITEM = weechat.bar_item_new(
+            "(extra)meechat_inspect",
+            "inspect_bar_item_cb",
+            "",
+        )
+
+    if INSPECT_BAR:
+        return
+
+    INSPECT_BAR = weechat.bar_new(
+        "meechat_inspect",
+        "off",
+        "100",
+        "window",
+        "${buffer.local_variables.type} == matrix",
+        "top",
+        "vertical",
+        "vertical",
+        "0",
+        "6",
+        "default",
+        "default",
+        "default",
+        "default",
+        "on",
+        "meechat_inspect",
+    )
+    if not INSPECT_BAR:
+        weechat.prnt("", "meechat: failed to create inspect bar")
+
+
+def _update_inspect_bar() -> None:
+    if INSPECT_BAR_ITEM:
+        weechat.bar_item_update("meechat_inspect")
+
+
+def inspect_bar_item_cb(
+    data: str,
+    item: str,
+    window: str,
+    buffer: str,
+    extra_info: dict[str, str],
+) -> str:
+    room_id = BUFFER_ROOMS.get(buffer, "")
+    if not room_id:
+        return ""
+    return _inspect_text(room_id)
+
+
+def _inspect_text(room_id: str) -> str:
+    room_name = ROOM_NAMES.get(room_id, room_id)
+    messages = ROOM_MESSAGES.get(room_id, [])
+    if not messages:
+        return "\n".join(
+            [
+                f"room: {room_name}",
+                f"id: {room_id}",
+                "message: none",
+            ]
+        )
+
+    index = max(
+        0,
+        min(len(messages) - 1, ROOM_INSPECT_INDEX.get(room_id, len(messages) - 1)),
+    )
+    ROOM_INSPECT_INDEX[room_id] = index
+    message = messages[index]
+    sender = str(message.get("sender") or "")
+    display_name = str(message.get("sender_display_name") or sender)
+    event_id = str(message.get("event_id") or "")
+    timestamp = int(message.get("timestamp") or 0)
+    body = _single_line_body(str(message.get("body") or ""))
+
+    lines = [
+        f"room: {room_name} | message: {index + 1}/{len(messages)}",
+        f"time: {_format_inspect_time(timestamp)} | sender: {display_name}",
+    ]
+    if sender and sender != display_name:
+        lines.append(f"user: {sender}")
+    if event_id:
+        lines.append(f"event: {event_id}")
+    lines.append(f"body: {body}")
+    return "\n".join(lines)
+
+
+def _single_line_body(body: str) -> str:
+    body = " / ".join(line.strip() for line in body.splitlines()).strip()
+    if len(body) <= 240:
+        return body
+    return body[:237] + "..."
+
+
+def _remove_inspect_bar() -> None:
+    global INSPECT_BAR, INSPECT_BAR_ITEM
+
+    if INSPECT_BAR:
+        weechat.bar_remove(INSPECT_BAR)
+        INSPECT_BAR = ""
+    if INSPECT_BAR_ITEM:
+        weechat.bar_item_remove(INSPECT_BAR_ITEM)
+        INSPECT_BAR_ITEM = ""
+
+
+def _format_inspect_time(timestamp: int) -> str:
+    if not timestamp:
+        return "unknown"
+    try:
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
+    except Exception:
+        return str(timestamp)
 
 
 def _safe_name(value: str) -> str:
@@ -429,6 +621,9 @@ def room_close_cb(data: str, buffer: str) -> int:
     room_id = data or BUFFER_ROOMS.get(buffer, "")
     if room_id:
         ROOM_BUFFERS.pop(room_id, None)
+        ROOM_MESSAGES.pop(room_id, None)
+        ROOM_INSPECT_INDEX.pop(room_id, None)
+        _update_inspect_bar()
     BUFFER_ROOMS.pop(buffer, None)
     return weechat.WEECHAT_RC_OK
 
@@ -436,6 +631,7 @@ def room_close_cb(data: str, buffer: str) -> int:
 def script_unload_cb() -> int:
     if WORKER_HOOK:
         _send_to_worker({"type": "shutdown"})
+    _remove_inspect_bar()
     return weechat.WEECHAT_RC_OK
 
 
@@ -453,6 +649,18 @@ def command_cb(data: str, buffer: str, args: str) -> int:
 
     if subcommand == "rooms":
         _send_to_worker({"type": "rooms"})
+        return weechat.WEECHAT_RC_OK
+
+    if subcommand == "inspect":
+        _show_inspect(buffer)
+        return weechat.WEECHAT_RC_OK
+
+    if subcommand == "inspect-prev":
+        _inspect_step(buffer, -1)
+        return weechat.WEECHAT_RC_OK
+
+    if subcommand == "inspect-next":
+        _inspect_step(buffer, 1)
         return weechat.WEECHAT_RC_OK
 
     if subcommand == "join":
@@ -496,6 +704,9 @@ def _print_help(buffer: str) -> None:
     weechat.prnt(buffer, "  /meechat connect")
     weechat.prnt(buffer, "  /meechat disconnect")
     weechat.prnt(buffer, "  /meechat rooms")
+    weechat.prnt(buffer, "  /meechat inspect")
+    weechat.prnt(buffer, "  /meechat inspect-prev")
+    weechat.prnt(buffer, "  /meechat inspect-next")
     weechat.prnt(buffer, "  /meechat join <room-id-or-alias>")
     weechat.prnt(buffer, "  /meechat leave [room-id]")
     weechat.prnt(buffer, "  /meechat set <option> <value>")
@@ -521,18 +732,24 @@ def _register() -> None:
     weechat.hook_command(
         "meechat",
         "Matrix client adapter",
-        "connect | disconnect | rooms | join <room> | leave [room-id] | set <option> <value> | status",
+        "connect | disconnect | rooms | inspect | inspect-prev | inspect-next | "
+        "join <room> | leave [room-id] | set <option> <value> | status",
         "connect: connect to Matrix\n"
         "disconnect: stop the Matrix worker\n"
         "rooms: refresh joined room buffers\n"
+        "inspect: show the message inspector monitor for the current Matrix room\n"
+        "inspect-prev: inspect the previous message in the current Matrix room\n"
+        "inspect-next: inspect the next message in the current Matrix room\n"
         "join: join a Matrix room by alias or room ID\n"
         "leave: leave the current room buffer or provided room ID\n"
         "set: set a MeeChat plugin option\n"
         "status: show worker status",
-        "connect || disconnect || rooms || join || leave || set || status",
+        "connect || disconnect || rooms || inspect || inspect-prev || "
+        "inspect-next || join || leave || set || status",
         "command_cb",
         "",
     )
+    _ensure_inspect_bar()
 
     if _option_bool("autoconnect"):
         _connect()
