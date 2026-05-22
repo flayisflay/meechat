@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "meechat"
+version = "0.1.0"
+description = "A small Matrix adapter for WeeChat."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "matrix-nio>=0.25.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.setuptools]
+packages = ["meechat_matrix"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
