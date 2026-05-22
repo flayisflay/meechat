@@ -41,6 +41,7 @@ DEFAULT_OPTIONS = {
     "device_id": "",
     "store_path": "",
     "sync_timeout_ms": "30000",
+    "backlog_limit": "100",
     "python": "python3",
     "autoconnect": "off",
     "debug": "off",
@@ -56,6 +57,7 @@ OPTION_DESCRIPTIONS = {
     "device_id": "Matrix device ID associated with the access token",
     "store_path": "matrix-nio store directory; empty uses WeeChat config dir",
     "sync_timeout_ms": "Matrix sync long-poll timeout in milliseconds",
+    "backlog_limit": "Recent Matrix room messages requested on initial sync",
     "python": "Python executable used to start the Matrix worker",
     "autoconnect": "Connect when the script loads: on/off",
     "debug": "Print worker stderr and protocol details: on/off",
@@ -117,6 +119,7 @@ def _config_message() -> dict[str, Any] | None:
         "device_id": _option("device_id", expand=True),
         "store_path": _option("store_path", expand=True) or _default_store_path(),
         "sync_timeout_ms": _option("sync_timeout_ms", expand=True),
+        "backlog_limit": _option("backlog_limit", expand=True),
     }
 
     missing = []
@@ -349,18 +352,35 @@ def _print_matrix_message(message: dict[str, Any]) -> None:
         return
 
     sender = str(message.get("sender") or "")
+    sender_display_name = str(message.get("sender_display_name") or sender)
     body = str(message.get("body") or "")
     timestamp_ms = int(message.get("server_timestamp") or 0)
     timestamp = timestamp_ms // 1000 if timestamp_ms else 0
     tags = "notify_message"
     if sender:
         tags += ",nick_" + sender
-    weechat.prnt_date_tags(buffer, timestamp, tags, f"{sender}\t{body}")
+    weechat.prnt_date_tags(
+        buffer,
+        timestamp,
+        tags,
+        f"{_colored_nick(sender_display_name)}\t{body}",
+    )
 
 
 def _safe_name(value: str) -> str:
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_")
     return safe[:80] or "room"
+
+
+def _colored_nick(nick: str) -> str:
+    if not nick:
+        return ""
+
+    color = weechat.info_get("nick_color_name", nick)
+    if not color:
+        return nick
+
+    return f"{weechat.color(color)}{nick}{weechat.color('reset')}"
 
 
 def _debug(message: str) -> None:

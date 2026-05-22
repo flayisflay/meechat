@@ -7,7 +7,7 @@ import pytest
 from nio.responses import SyncError
 
 from meechat_matrix.protocol import ProtocolError, loads
-from meechat_matrix.worker import MatrixWorker, WorkerConfig, _room_name
+from meechat_matrix.worker import MatrixWorker, WorkerConfig, _room_name, _sync_filter
 
 
 def test_worker_config_from_message():
@@ -20,6 +20,7 @@ def test_worker_config_from_message():
             "device_id": " DEVICE ",
             "store_path": " /tmp/store ",
             "sync_timeout_ms": "45000",
+            "backlog_limit": "250",
         }
     )
 
@@ -31,6 +32,7 @@ def test_worker_config_from_message():
     assert not config.use_password_login
     assert config.store_path == "/tmp/store"
     assert config.sync_timeout_ms == 45000
+    assert config.backlog_limit == 250
 
 
 def test_worker_config_requires_credentials():
@@ -79,6 +81,20 @@ def test_worker_config_rejects_tiny_sync_timeout():
         )
 
 
+def test_worker_config_rejects_tiny_backlog_limit():
+    with pytest.raises(ProtocolError, match="backlog_limit"):
+        WorkerConfig.from_message(
+            {
+                "type": "configure",
+                "homeserver": "https://matrix.example",
+                "user_id": "@alice:example",
+                "access_token": "token",
+                "device_id": "DEVICE",
+                "backlog_limit": "0",
+            }
+        )
+
+
 def test_room_name_prefers_display_name():
     room = type(
         "Room",
@@ -97,8 +113,16 @@ def test_sync_loop_reports_connected_after_successful_sync():
         class FakeClient:
             rooms = {}
             next_batch = "batch"
+            sync_calls = []
 
-            async def sync(self, *, timeout, full_state):
+            async def sync(self, *, timeout, sync_filter, full_state):
+                self.sync_calls.append(
+                    {
+                        "timeout": timeout,
+                        "sync_filter": sync_filter,
+                        "full_state": full_state,
+                    }
+                )
                 if full_state:
                     return SyncResponse()
                 raise asyncio.CancelledError
@@ -111,8 +135,10 @@ def test_sync_loop_reports_connected_after_successful_sync():
             user_id="@alice:example",
             access_token="token",
             device_id="DEVICE",
+            backlog_limit=25,
         )
-        worker.client = FakeClient()
+        client = FakeClient()
+        worker.client = client
 
         with pytest.raises(asyncio.CancelledError):
             await worker.sync_loop()
@@ -120,6 +146,11 @@ def test_sync_loop_reports_connected_after_successful_sync():
         messages = [loads(line) for line in stdout.getvalue().splitlines()]
         assert messages[0] == {"type": "connected", "user_id": "@alice:example"}
         assert messages[1] == {"type": "sync", "first": True, "next_batch": "batch"}
+        assert client.sync_calls[0] == {
+            "timeout": 30000,
+            "sync_filter": {"room": {"timeline": {"limit": 25}}},
+            "full_state": True,
+        }
 
     asyncio.run(run_test())
 
@@ -190,11 +221,38 @@ def test_connect_logs_in_with_password(monkeypatch):
         client = FakeClient.instances[0]
         assert client.homeserver == "https://matrix.example"
         assert client.user == "alice"
+        assert not client.config.store_sync_tokens
         assert client.login_calls == [("secret", "MeeChat")]
         assert client.callback_calls
         assert worker.config.user_id == "@alice:example"
         assert worker.config.device_id == "SERVERDEVICE"
         assert worker.config.access_token == "SERVER_TOKEN"
+
+    asyncio.run(run_test())
+
+
+def test_on_room_message_emits_sender_display_name():
+    async def run_test():
+        user = SimpleNamespace(display_name="Alice")
+        room = SimpleNamespace(
+            room_id="!room:example",
+            display_name="General",
+            users={"@alice:example": user},
+        )
+        event = SimpleNamespace(
+            sender="@alice:example",
+            body="hello",
+            event_id="$event",
+            server_timestamp=123000,
+        )
+        stdout = io.StringIO()
+        worker = MatrixWorker(stdout=stdout)
+
+        await worker.on_room_message(room, event)
+
+        message = loads(stdout.getvalue())
+        assert message["sender"] == "@alice:example"
+        assert message["sender_display_name"] == "Alice"
 
     asyncio.run(run_test())
 
@@ -206,7 +264,7 @@ def test_sync_loop_stops_on_unknown_token():
             next_batch = ""
             closed = False
 
-            async def sync(self, *, timeout, full_state):
+            async def sync(self, *, timeout, sync_filter, full_state):
                 return SyncError("Invalid access token passed.", "M_UNKNOWN_TOKEN")
 
             async def close(self):
@@ -236,3 +294,7 @@ def test_sync_loop_stops_on_unknown_token():
         assert client.closed
 
     asyncio.run(run_test())
+
+
+def test_sync_filter_sets_room_timeline_limit():
+    assert _sync_filter(75) == {"room": {"timeline": {"limit": 75}}}

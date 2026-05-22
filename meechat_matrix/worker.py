@@ -34,6 +34,7 @@ class WorkerConfig:
     password: str = ""
     store_path: str = ""
     sync_timeout_ms: int = 30000
+    backlog_limit: int = 100
 
     @classmethod
     def from_message(cls, message: dict[str, Any]) -> "WorkerConfig":
@@ -76,6 +77,14 @@ class WorkerConfig:
         if sync_timeout_ms < 1000:
             raise ProtocolError("sync_timeout_ms must be at least 1000")
 
+        try:
+            backlog_limit = int(message.get("backlog_limit") or 100)
+        except (TypeError, ValueError) as exc:
+            raise ProtocolError("backlog_limit must be an integer") from exc
+
+        if backlog_limit < 1:
+            raise ProtocolError("backlog_limit must be at least 1")
+
         return cls(
             auth=auth,
             homeserver=homeserver,
@@ -86,6 +95,7 @@ class WorkerConfig:
             password=password,
             store_path=str(message.get("store_path") or "").strip(),
             sync_timeout_ms=sync_timeout_ms,
+            backlog_limit=backlog_limit,
         )
 
     @property
@@ -208,7 +218,7 @@ class MatrixWorker:
             )
             return
 
-        nio_config = ClientConfig(store_sync_tokens=True)
+        nio_config = ClientConfig(store_sync_tokens=False)
         client_user = self.config.username or self.config.user_id
         self.client = AsyncClient(
             self.config.homeserver,
@@ -289,6 +299,7 @@ class MatrixWorker:
                 try:
                     response = await self.client.sync(
                         timeout=self.config.sync_timeout_ms,
+                        sync_filter=_sync_filter(self.config.backlog_limit),
                         full_state=first_sync,
                     )
                     if response.__class__.__name__ == "SyncResponse":
@@ -345,6 +356,7 @@ class MatrixWorker:
                 "room_id": room_id,
                 "room_name": _room_name(room),
                 "sender": sender,
+                "sender_display_name": _sender_display_name(room, sender),
                 "body": body,
                 "event_id": getattr(event, "event_id", ""),
                 "server_timestamp": getattr(event, "server_timestamp", 0),
@@ -451,6 +463,27 @@ def _room_name(room: Any) -> str:
         if value:
             return str(value)
     return str(getattr(room, "room_id", ""))
+
+
+def _sender_display_name(room: Any, sender: str) -> str:
+    users = getattr(room, "users", {}) or {}
+    user = users.get(sender)
+    if user is not None:
+        display_name = getattr(user, "display_name", "")
+        if display_name:
+            return str(display_name)
+
+    user_name = getattr(room, "user_name", None)
+    if callable(user_name):
+        name = user_name(sender)
+        if name:
+            return str(name)
+
+    return sender
+
+
+def _sync_filter(backlog_limit: int) -> dict[str, Any]:
+    return {"room": {"timeline": {"limit": backlog_limit}}}
 
 
 def _is_unknown_token_response(response: Any) -> bool:

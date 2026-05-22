@@ -94,6 +94,13 @@ optional for password login; setting it gives MeeChat a stable Matrix device ID.
 `auth` can be `auto`, `token`, or `password`; `auto` uses password login when a
 password is configured, otherwise it uses token auth.
 
+MeeChat requests recent room history on the first sync after connecting. Tune
+how much history is requested per room with:
+
+```text
+/set plugins.var.python.meechat.backlog_limit "100"
+```
+
 If `/meechat connect` reports `M_UNKNOWN_TOKEN` while `auth` is `token`, the
 homeserver rejected the configured access token. If it happens while `auth` is
 `password`, the homeserver rejected the token returned by the password login

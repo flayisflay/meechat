@@ -6,6 +6,9 @@ class FakeWeechat:
         self.options = options or {}
         self.process_calls = []
         self.printed = []
+        self.printed_lines = []
+        self.buffers = []
+        self.buffer_properties = []
 
     def config_get_plugin(self, name):
         defaults = {"auth": "auto", "python": "python3", "debug": "off"}
@@ -20,7 +23,22 @@ class FakeWeechat:
     def info_get(self, name, _args):
         if name == "weechat_config_dir":
             return "/tmp/weechat"
+        if name == "nick_color_name":
+            return "red"
         return ""
+
+    def color(self, name):
+        return f"<{name}>"
+
+    def buffer_new(self, name, input_cb, input_data, close_cb, close_data):
+        self.buffers.append((name, input_cb, input_data, close_cb, close_data))
+        return "buffer"
+
+    def buffer_set(self, buffer, property_name, value):
+        self.buffer_properties.append((buffer, property_name, value))
+
+    def prnt_date_tags(self, buffer, timestamp, tags, message):
+        self.printed_lines.append((buffer, timestamp, tags, message))
 
     def hook_process_hashtable(self, command, options, timeout, callback, data):
         self.process_calls.append((command, options, timeout, callback, data))
@@ -60,3 +78,31 @@ def test_config_message_password_auth_ignores_stale_token_requirement(monkeypatc
     assert message["password"] == "secret"
     assert message["access_token"] == "STALE_TOKEN"
     assert not fake.printed
+
+
+def test_print_matrix_message_uses_colored_display_name(monkeypatch):
+    fake = FakeWeechat()
+    monkeypatch.setattr(meechat, "weechat", fake)
+    monkeypatch.setattr(meechat, "ROOM_BUFFERS", {})
+    monkeypatch.setattr(meechat, "BUFFER_ROOMS", {})
+    monkeypatch.setattr(meechat, "ROOM_NAMES", {})
+
+    meechat._print_matrix_message(
+        {
+            "room_id": "!room:example",
+            "room_name": "General",
+            "sender": "@alice:example",
+            "sender_display_name": "Alice",
+            "body": "hello",
+            "server_timestamp": 123000,
+        }
+    )
+
+    assert fake.printed_lines == [
+        (
+            "buffer",
+            123,
+            "notify_message,nick_@alice:example",
+            "<red>Alice<reset>\thello",
+        )
+    ]
