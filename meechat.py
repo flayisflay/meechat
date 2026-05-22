@@ -61,7 +61,7 @@ OPTION_DESCRIPTIONS = {
     "backlog_limit": "Recent Matrix room messages requested on initial sync",
     "python": "Python executable used to start the Matrix worker",
     "autoconnect": "Connect when the script loads: on/off",
-    "debug": "Print worker stderr and protocol details: on/off",
+    "debug": "Pass --debug to the worker for exception tracebacks: on/off",
 }
 
 WORKER_HOOK = ""
@@ -94,11 +94,88 @@ def _option_bool(name: str) -> bool:
     return _option(name).lower() in {"1", "true", "yes", "on"}
 
 
+def _log(message: str) -> None:
+    weechat.prnt("", "meechat: " + message)
+
+
+def _redacted_text(value: Any) -> str:
+    text = str(value or "")
+    if not text:
+        return "<empty>"
+    if len(text) <= 8:
+        return "<set>"
+    return text[:4] + "..." + text[-4:]
+
+
+def _protocol_summary(message: dict[str, Any]) -> str:
+    message_type = str(message.get("type") or "")
+    parts = [f"type={message_type}"]
+    for key in (
+        "auth",
+        "action",
+        "where",
+        "room_id",
+        "room",
+        "event_id",
+        "user_id",
+        "name",
+        "first",
+        "member_count",
+        "encrypted",
+    ):
+        if key in message:
+            parts.append(f"{key}={_summary_value(key, message[key])}")
+    if "receipts" in message:
+        parts.append(f"receipts={len(message.get('receipts') or [])}")
+    if "body" in message:
+        parts.append(f"body_len={len(str(message.get('body') or ''))}")
+    if "message" in message:
+        parts.append(f"message={message.get('message', '')}")
+    return " ".join(parts)
+
+
+def _summary_value(key: str, value: Any) -> str:
+    if key in {"room_id", "event_id", "user_id", "room"}:
+        return _redacted_text(value)
+    return str(value)
+
+
+def _redacted_protocol_line(line: str) -> str:
+    try:
+        return _protocol_summary(loads(line))
+    except Exception:
+        return f"<unparseable line len={len(line)}>"
+
+
+def _option_value_summary(name: str, value: Any) -> str:
+    if name in {"access_token", "password"}:
+        return "<redacted>"
+    return _redacted_text(value)
+
+
+def _command_summary(args: str) -> str:
+    argv = args.strip().split()
+    if not argv:
+        return "<empty>"
+
+    start = 1 if argv[0].lower() == "/meechat" else 0
+    if len(argv) > start and argv[start].lower() == "set" and len(argv) > start + 1:
+        name = argv[start + 1]
+        if name in {"access_token", "password"}:
+            prefix = "/meechat " if start else ""
+            return f"{prefix}set {name} <redacted>"
+
+    return args.strip()
+
+
 def _init_options() -> None:
+    _log("initializing plugin options")
     for name, default in DEFAULT_OPTIONS.items():
         if not weechat.config_is_set_plugin(name):
+            _log(f"creating option plugins.var.python.meechat.{name}={default!r}")
             weechat.config_set_plugin(name, default)
         weechat.config_set_desc_plugin(name, OPTION_DESCRIPTIONS[name])
+    _log("plugin options initialized")
 
 
 def _default_store_path() -> str:
@@ -115,6 +192,7 @@ def _worker_path() -> str:
 
 
 def _config_message() -> dict[str, Any] | None:
+    _log("building Matrix worker configuration from WeeChat options")
     auth = (_option("auth", expand=True) or "auto").lower()
     user_id = _option("user_id", expand=True)
     username = _option("username", expand=True) or user_id
@@ -145,6 +223,19 @@ def _config_message() -> dict[str, Any] | None:
     has_password = bool(str(message["password"]).strip())
     use_password = auth == "password" or (auth == "auto" and has_password)
     use_token = auth == "token" or (auth == "auto" and not use_password)
+    resolved_auth = "password" if use_password else "token"
+    _log(
+        "config summary: "
+        f"auth={auth} resolved_auth={resolved_auth} "
+        f"homeserver={_redacted_text(message['homeserver'])} "
+        f"user_id={_redacted_text(message['user_id'])} "
+        f"username={_redacted_text(message['username'])} "
+        f"device_id={_redacted_text(message['device_id'])} "
+        f"access_token_present={has_access_token} password_present={has_password} "
+        f"store_path={_redacted_text(message['store_path'])} "
+        f"sync_timeout_ms={message['sync_timeout_ms']} "
+        f"backlog_limit={message['backlog_limit']}"
+    )
 
     if use_password:
         if not has_password:
@@ -162,11 +253,13 @@ def _config_message() -> dict[str, Any] | None:
                 missing.append("plugins.var.python.meechat." + key)
 
     if missing:
+        _log("configuration blocked; missing " + ", ".join(missing))
         weechat.prnt(
             "",
             "meechat: missing required option(s): " + ", ".join(missing),
         )
         return None
+    _log("configuration looks complete; worker configure message ready")
     return message
 
 
@@ -174,6 +267,7 @@ def _start_worker() -> bool:
     global WORKER_HOOK
 
     if WORKER_HOOK:
+        _log(f"worker already started; hook={WORKER_HOOK}")
         return True
 
     python = _option("python", expand=True) or "python3"
@@ -181,6 +275,11 @@ def _start_worker() -> bool:
     if _option_bool("debug"):
         options["arg2"] = "--debug"
 
+    _log(
+        "starting Matrix worker: "
+        f"python={python} worker_path={_worker_path()} "
+        f"debug={_option_bool('debug')} buffer_flush=1 stdin=1"
+    )
     WORKER_HOOK = weechat.hook_process_hashtable(
         python,
         options,
@@ -189,13 +288,16 @@ def _start_worker() -> bool:
         "",
     )
     if not WORKER_HOOK:
-        weechat.prnt("", "meechat: failed to start Matrix worker")
+        _log("failed to start Matrix worker; hook_process_hashtable returned empty")
         return False
+    _log(f"Matrix worker started; hook={WORKER_HOOK}")
     return True
 
 
 def _send_to_worker(message: dict[str, Any]) -> bool:
+    _log("send to worker requested: " + _protocol_summary(message))
     if not WORKER_HOOK and not _start_worker():
+        _log("send to worker aborted because worker could not be started")
         return False
 
     try:
@@ -205,24 +307,32 @@ def _send_to_worker(message: dict[str, Any]) -> bool:
         return False
 
     weechat.hook_set(WORKER_HOOK, "stdin", payload)
+    _log("sent worker message: " + _protocol_summary(message))
     return True
 
 
 def _connect() -> None:
+    _log("/meechat connect invoked")
     message = _config_message()
     if message is None:
+        _log("connect aborted before worker startup due to invalid config")
         return
 
     if not _start_worker():
+        _log("connect aborted because worker startup failed")
         return
 
+    _log("sending configure then connect commands to worker")
     _send_to_worker(message)
     _send_to_worker({"type": "connect"})
 
 
 def _disconnect() -> None:
+    _log("/meechat disconnect invoked")
     if WORKER_HOOK:
         _send_to_worker({"type": "shutdown"})
+    else:
+        _log("disconnect requested but no worker hook is active")
 
 
 def _consume_worker_output(output: str | bytes) -> None:
@@ -231,11 +341,14 @@ def _consume_worker_output(output: str | bytes) -> None:
     if isinstance(output, bytes):
         output = output.decode("utf-8", errors="replace")
 
+    if output:
+        _log(f"worker stdout chunk received: bytes={len(output)}")
     WORKER_STDOUT += output
     while "\n" in WORKER_STDOUT:
         line, WORKER_STDOUT = WORKER_STDOUT.split("\n", 1)
         if not line.strip():
             continue
+        _log("worker stdout line: " + _redacted_protocol_line(line))
         try:
             _handle_worker_message(loads(line))
         except ProtocolError as exc:
@@ -244,25 +357,32 @@ def _consume_worker_output(output: str | bytes) -> None:
 
 def _handle_worker_message(message: dict[str, Any]) -> None:
     message_type = message["type"]
+    _log("received worker message: " + _protocol_summary(message))
 
     if message_type == "ready":
-        _debug(f"worker ready {message.get('version', '')}")
+        _log(f"worker ready; version={message.get('version', '')}")
         return
 
     if message_type == "configured":
-        _debug("worker configured")
+        _log("worker accepted configuration")
         return
 
     if message_type == "connected":
         weechat.prnt("", f"meechat: connected as {message.get('user_id', '')}")
+        _log("connection established; requesting/expecting room sync")
         return
 
     if message_type == "disconnected":
         weechat.prnt("", "meechat: disconnected")
+        _log("worker reported disconnected")
         return
 
     if message_type == "sync":
-        _debug("sync ok")
+        _log(
+            "sync ok: "
+            f"first={message.get('first', '')} "
+            f"next_batch_present={bool(message.get('next_batch', ''))}"
+        )
         return
 
     if message_type == "room":
@@ -283,7 +403,7 @@ def _handle_worker_message(message: dict[str, Any]) -> None:
         return
 
     if message_type == "send_ok":
-        _debug(f"sent {message.get('event_id', '')}")
+        _log(f"message send confirmed; event_id={message.get('event_id', '')}")
         return
 
     if message_type == "joined":
@@ -301,9 +421,14 @@ def _handle_worker_message(message: dict[str, Any]) -> None:
         target = _buffer_for_room(str(message.get("room_id") or ""))
         where = message.get("where", "worker")
         weechat.prnt(target, f"meechat: {where}: {message.get('message', '')}")
+        _log(
+            "worker error: "
+            f"where={where} room_id={message.get('room_id', '')} "
+            f"message={message.get('message', '')}"
+        )
         return
 
-    _debug(f"ignored worker message: {message}")
+    _log(f"ignored worker message: {_protocol_summary(message)}")
 
 
 def _record_room(
@@ -314,6 +439,7 @@ def _record_room(
     encrypted: bool = False,
 ) -> str:
     if not room_id:
+        _log("ignoring room record with empty room_id")
         return ""
 
     ROOM_NAMES[room_id] = name or room_id
@@ -321,8 +447,19 @@ def _record_room(
         ROOM_TOPICS[room_id] = topic
     buffer = _buffer_for_room(room_id)
     if not buffer:
+        _log(
+            "creating room buffer: "
+            f"room_id={_redacted_text(room_id)} name={name or room_id!r} "
+            f"topic_len={len(topic or '')} encrypted={encrypted}"
+        )
         buffer = _create_room_buffer(room_id, name or room_id, topic=topic)
     else:
+        _log(
+            "updating room buffer: "
+            f"room_id={_redacted_text(room_id)} buffer={buffer} "
+            f"name={name or room_id!r} topic_len={len(topic or '')} "
+            f"encrypted={encrypted}"
+        )
         _update_room_buffer(
             buffer,
             room_id,
@@ -352,11 +489,16 @@ def _create_room_buffer(
         room_id,
     )
     if not buffer:
-        weechat.prnt("", f"meechat: failed to create buffer for {room_id}")
+        _log(f"failed to create buffer for room_id={_redacted_text(room_id)}")
         return ""
 
     ROOM_BUFFERS[room_id] = buffer
     BUFFER_ROOMS[buffer] = room_id
+    _log(
+        "room buffer created: "
+        f"buffer={buffer} room_id={_redacted_text(room_id)} "
+        f"buffer_name={buffer_name}"
+    )
     _update_room_buffer(buffer, room_id, name, topic=topic)
     return buffer
 
@@ -381,6 +523,11 @@ def _update_room_buffer(
     weechat.buffer_set(buffer, "localvar_set_room_id", room_id)
     weechat.buffer_set(buffer, "key_bind_meta-shift-up", "/meechat inspect-prev")
     weechat.buffer_set(buffer, "key_bind_meta-shift-down", "/meechat inspect-next")
+    _log(
+        "room buffer updated: "
+        f"buffer={buffer} short_name={short_name!r} "
+        f"title_len={len(ROOM_TOPICS.get(room_id, ''))}"
+    )
 
 
 def _print_matrix_message(message: dict[str, Any]) -> None:
@@ -391,6 +538,7 @@ def _print_matrix_message(message: dict[str, Any]) -> None:
     )
     buffer = _record_room(room_id, room_name, topic=room_topic)
     if not buffer:
+        _log("dropping Matrix message because no room buffer could be created")
         return
 
     sender = str(message.get("sender") or "")
@@ -403,6 +551,13 @@ def _print_matrix_message(message: dict[str, Any]) -> None:
     if sender:
         tags += ",nick_" + sender
     prefix = _colored_nick(sender_display_name)
+    _log(
+        "printing Matrix message: "
+        f"room_id={_redacted_text(room_id)} buffer={buffer} "
+        f"event_id={_redacted_text(event_id)} sender={_redacted_text(sender)} "
+        f"display_name={sender_display_name!r} body_len={len(body)} "
+        f"timestamp={timestamp}"
+    )
     weechat.prnt_date_tags(
         buffer,
         timestamp,
@@ -431,6 +586,11 @@ def _record_room_message(room_id: str, message: dict[str, Any]) -> None:
     highlight_active = room_id in ROOM_HIGHLIGHTED_INDEX
 
     messages.append(message)
+    _log(
+        "cached room message: "
+        f"room_id={_redacted_text(room_id)} cached_count={len(messages)} "
+        f"event_id={_redacted_text(message.get('event_id', ''))}"
+    )
     if len(messages) > INSPECT_HISTORY_LIMIT:
         overflow = len(messages) - INSPECT_HISTORY_LIMIT
         if highlight_active:
@@ -450,9 +610,11 @@ def _record_room_message(room_id: str, message: dict[str, Any]) -> None:
 def _record_read_receipts(message: dict[str, Any]) -> None:
     room_id = str(message.get("room_id") or "")
     if not room_id:
+        _log("ignoring read receipts with empty room_id")
         return
 
     room_receipts = ROOM_READ_RECEIPTS.setdefault(room_id, {})
+    receipt_count = 0
     for receipt in message.get("receipts") or []:
         event_id = str(receipt.get("event_id") or "")
         user_id = str(receipt.get("user_id") or "")
@@ -464,13 +626,25 @@ def _record_read_receipts(message: dict[str, Any]) -> None:
             "display_name": str(receipt.get("display_name") or user_id),
             "timestamp": int(receipt.get("timestamp") or 0),
         }
+        receipt_count += 1
 
+    _log(
+        "recorded read receipts: "
+        f"room_id={_redacted_text(room_id)} count={receipt_count} "
+        f"room_receipt_users={len(room_receipts)}"
+    )
     _update_inspect_bar()
 
 
 def _show_inspect(buffer: str) -> None:
     room_id = _inspect_room_from_context(buffer)
+    _log(
+        "inspect requested: "
+        f"buffer={buffer} room_id={_redacted_text(room_id)} "
+        f"messages={len(ROOM_MESSAGES.get(room_id, [])) if room_id else 0}"
+    )
     if not room_id:
+        _log("inspect request rejected because buffer is not a Matrix room")
         weechat.prnt(buffer, "meechat: inspect is only available in a Matrix room")
         return
 
@@ -482,7 +656,13 @@ def _show_inspect(buffer: str) -> None:
 
 def _inspect_step(buffer: str, direction: int) -> None:
     room_id = _inspect_room_from_context(buffer)
+    _log(
+        "inspect navigation requested: "
+        f"buffer={buffer} direction={direction} "
+        f"room_id={_redacted_text(room_id)}"
+    )
     if not room_id:
+        _log("inspect navigation rejected because buffer is not a Matrix room")
         weechat.prnt(buffer, "meechat: inspect is only available in a Matrix room")
         return
 
@@ -494,6 +674,16 @@ def _inspect_step(buffer: str, direction: int) -> None:
         ROOM_INSPECT_INDEX[room_id] = max(
             0,
             min(len(messages) - 1, index + direction),
+        )
+        _log(
+            "inspect selection changed: "
+            f"room_id={_redacted_text(room_id)} previous={index} "
+            f"current={ROOM_INSPECT_INDEX[room_id]} count={len(messages)}"
+        )
+    else:
+        _log(
+            "inspect navigation found no cached messages: "
+            f"room_id={_redacted_text(room_id)}"
         )
     _highlight_inspect_message(room_id)
     _update_inspect_bar()
@@ -507,6 +697,10 @@ def _select_inspect_room(room_id: str) -> None:
     messages = ROOM_MESSAGES.get(room_id, [])
     if messages and room_id not in ROOM_INSPECT_INDEX:
         ROOM_INSPECT_INDEX[room_id] = len(messages) - 1
+        _log(
+            "inspect room selected at latest message: "
+            f"room_id={_redacted_text(room_id)} index={len(messages) - 1}"
+        )
 
 
 def _highlight_inspect_message(room_id: str) -> None:
@@ -514,26 +708,54 @@ def _highlight_inspect_message(room_id: str) -> None:
 
     messages = ROOM_MESSAGES.get(room_id, [])
     if not messages:
+        _log(
+            "inspect highlight skipped; no cached messages: "
+            f"room_id={_redacted_text(room_id)}"
+        )
         return
 
     index = max(
         0,
         min(len(messages) - 1, ROOM_INSPECT_INDEX.get(room_id, len(messages) - 1)),
     )
+    _log(
+        "inspect highlight requested: "
+        f"room_id={_redacted_text(room_id)} index={index} "
+        f"event_id={_redacted_text(messages[index].get('event_id', ''))}"
+    )
     if _update_message_line(messages[index], selected=True):
         ROOM_HIGHLIGHTED_INDEX[room_id] = index
+        _log(
+            "inspect highlight applied: "
+            f"room_id={_redacted_text(room_id)} index={index}"
+        )
+    else:
+        _log(
+            "inspect highlight could not update line: "
+            f"room_id={_redacted_text(room_id)} index={index}"
+        )
 
 
 def _restore_inspect_highlight(room_id: str) -> None:
     index = ROOM_HIGHLIGHTED_INDEX.pop(room_id, None)
     messages = ROOM_MESSAGES.get(room_id, [])
     if index is None or index >= len(messages):
+        _log(
+            "inspect highlight restore skipped: "
+            f"room_id={_redacted_text(room_id)} index={index} "
+            f"message_count={len(messages)}"
+        )
         return
 
-    _update_message_line(messages[index], selected=False)
+    restored = _update_message_line(messages[index], selected=False)
+    _log(
+        "inspect highlight restored: "
+        f"room_id={_redacted_text(room_id)} index={index} restored={restored}"
+    )
 
 
 def _restore_all_inspect_highlights() -> None:
+    _log(f"restoring all inspect highlights: count={len(ROOM_HIGHLIGHTED_INDEX)}")
     for room_id in list(ROOM_HIGHLIGHTED_INDEX):
         _restore_inspect_highlight(room_id)
 
@@ -541,6 +763,11 @@ def _restore_all_inspect_highlights() -> None:
 def _update_message_line(message: dict[str, Any], *, selected: bool) -> bool:
     line_data = str(message.get("line_data") or "")
     if not line_data or not hasattr(weechat, "hdata_update"):
+        _log(
+            "line update unavailable: "
+            f"selected={selected} line_data_present={bool(line_data)} "
+            f"hdata_update_present={hasattr(weechat, 'hdata_update')}"
+        )
         return False
 
     prefix = str(message.get("line_prefix") or "")
@@ -556,8 +783,13 @@ def _update_message_line(message: dict[str, Any], *, selected: bool) -> bool:
             line_data,
             {"prefix": prefix, "message": body},
         )
-    except Exception:
+    except Exception as exc:
+        _log(f"line update failed: selected={selected} error={exc}")
         return False
+    _log(
+        "line update completed: "
+        f"selected={selected} line_data={line_data} updated_fields={updated}"
+    )
     return bool(updated)
 
 
@@ -565,23 +797,32 @@ def _last_printed_line_data(buffer: str) -> str:
     for name in ("own_lines", "lines"):
         line_data = _last_printed_line_data_from_lines(buffer, name)
         if line_data:
+            _log(f"last printed line data found: buffer={buffer} source={name}")
             return line_data
+    _log(f"last printed line data not found: buffer={buffer}")
     return ""
 
 
 def _last_printed_line_data_from_lines(buffer: str, lines_name: str) -> str:
     if not hasattr(weechat, "hdata_pointer"):
+        _log("hdata_pointer unavailable while looking up last printed line")
         return ""
 
     try:
         lines = weechat.hdata_pointer(weechat.hdata_get("buffer"), buffer, lines_name)
         if not lines:
+            _log(f"no WeeChat lines pointer: buffer={buffer} source={lines_name}")
             return ""
         line = weechat.hdata_pointer(weechat.hdata_get("lines"), lines, "last_line")
         if not line:
+            _log(f"no last_line pointer: buffer={buffer} source={lines_name}")
             return ""
         return str(weechat.hdata_pointer(weechat.hdata_get("line"), line, "data"))
-    except Exception:
+    except Exception as exc:
+        _log(
+            "failed looking up last printed line data: "
+            f"buffer={buffer} source={lines_name} error={exc}"
+        )
         return ""
 
 
@@ -589,13 +830,18 @@ def _ensure_inspect_bar() -> None:
     global INSPECT_BAR, INSPECT_BAR_ITEM
 
     if not INSPECT_BAR_ITEM:
+        _log("creating inspect bar item")
         INSPECT_BAR_ITEM = weechat.bar_item_new(
             "(extra)meechat_inspect",
             "inspect_bar_item_cb",
             "",
         )
+        _log(f"inspect bar item result: item={INSPECT_BAR_ITEM}")
+    else:
+        _log(f"inspect bar item already exists: item={INSPECT_BAR_ITEM}")
 
     if not INSPECT_BAR:
+        _log("creating inspect bar")
         INSPECT_BAR = weechat.bar_new(
             "meechat_inspect",
             "off",
@@ -616,6 +862,11 @@ def _ensure_inspect_bar() -> None:
         )
         if not INSPECT_BAR:
             weechat.prnt("", "meechat: failed to create inspect bar")
+            _log("inspect bar creation failed")
+        else:
+            _log(f"inspect bar created: bar={INSPECT_BAR}")
+    else:
+        _log(f"inspect bar already exists: bar={INSPECT_BAR}")
 
     _ensure_topic_bar()
 
@@ -624,8 +875,10 @@ def _ensure_topic_bar() -> None:
     global TOPIC_BAR
 
     if TOPIC_BAR:
+        _log(f"topic bar already exists: bar={TOPIC_BAR}")
         return
 
+    _log("creating topic bar")
     TOPIC_BAR = weechat.bar_new(
         "meechat_topic",
         "off",
@@ -646,11 +899,17 @@ def _ensure_topic_bar() -> None:
     )
     if not TOPIC_BAR:
         weechat.prnt("", "meechat: failed to create topic bar")
+        _log("topic bar creation failed")
+    else:
+        _log(f"topic bar created: bar={TOPIC_BAR}")
 
 
 def _update_inspect_bar() -> None:
     if INSPECT_BAR_ITEM:
         weechat.bar_item_update("meechat_inspect")
+        _log(f"inspect bar item update requested: item={INSPECT_BAR_ITEM}")
+    else:
+        _log("inspect bar item update skipped; item does not exist")
 
 
 def inspect_bar_item_cb(
@@ -661,6 +920,11 @@ def inspect_bar_item_cb(
     extra_info: dict[str, str],
 ) -> str:
     room_id = BUFFER_ROOMS.get(buffer, "")
+    _log(
+        "inspect bar item render: "
+        f"buffer={buffer} room_id={_redacted_text(room_id)} "
+        f"item={item} window={window}"
+    )
     if not room_id:
         return ""
     return _inspect_text(room_id)
@@ -669,6 +933,7 @@ def inspect_bar_item_cb(
 def _inspect_text(room_id: str) -> str:
     messages = ROOM_MESSAGES.get(room_id, [])
     if not messages:
+        _log(f"inspect text requested with no messages: room_id={_redacted_text(room_id)}")
         return "\n".join(
             [
                 "message: none",
@@ -688,6 +953,12 @@ def _inspect_text(room_id: str) -> str:
     timestamp = int(message.get("timestamp") or 0)
     body = _single_line_body(str(message.get("body") or ""))
     receipts = _read_receipts_for_message(room_id, str(event_id), index)
+    _log(
+        "inspect text rendered: "
+        f"room_id={_redacted_text(room_id)} index={index} "
+        f"messages={len(messages)} receipts={len(receipts)} "
+        f"event_id={_redacted_text(event_id)} body_len={len(body)}"
+    )
 
     lines = [
         f"message: {index + 1}/{len(messages)}",
@@ -708,6 +979,10 @@ def _read_receipts_for_message(
     message_index: int,
 ) -> list[dict[str, Any]]:
     if not event_id:
+        _log(
+            "read receipt lookup skipped; event_id empty: "
+            f"room_id={_redacted_text(room_id)} index={message_index}"
+        )
         return []
 
     event_positions = {
@@ -724,16 +999,24 @@ def _read_receipts_for_message(
         ):
             receipts.append(receipt)
 
-    return sorted(
+    sorted_receipts = sorted(
         receipts,
         key=lambda receipt: (
             int(receipt.get("timestamp") or 0),
             str(receipt.get("display_name") or receipt.get("user_id") or ""),
         ),
     )
+    _log(
+        "read receipts matched for inspect message: "
+        f"room_id={_redacted_text(room_id)} "
+        f"event_id={_redacted_text(event_id)} "
+        f"message_index={message_index} receipts={len(sorted_receipts)}"
+    )
+    return sorted_receipts
 
 
 def _format_read_receipts(receipts: list[dict[str, Any]]) -> str:
+    _log(f"formatting read receipts: count={len(receipts)}")
     return " ".join(
         _colored_receipt_label(str(receipt.get("display_name") or ""))
         for receipt in receipts
@@ -743,12 +1026,18 @@ def _format_read_receipts(receipts: list[dict[str, Any]]) -> str:
 def _colored_receipt_label(display_name: str) -> str:
     label = display_name.strip()[:3]
     if not label:
+        _log("read receipt label skipped for empty display name")
         return ""
 
     color = weechat.info_get("nick_color_name", display_name)
     if not color:
+        _log(f"read receipt label uncolored: display_name={display_name!r}")
         return label
 
+    _log(
+        "read receipt label colored: "
+        f"display_name={display_name!r} label={label!r} color={color}"
+    )
     return f"{weechat.color(color)}{label}{weechat.color('reset')}"
 
 
@@ -763,14 +1052,23 @@ def _remove_inspect_bar() -> None:
     global INSPECT_BAR, INSPECT_BAR_ITEM, TOPIC_BAR
 
     if INSPECT_BAR:
+        _log(f"removing inspect bar: bar={INSPECT_BAR}")
         weechat.bar_remove(INSPECT_BAR)
         INSPECT_BAR = ""
+    else:
+        _log("inspect bar removal skipped; no inspect bar")
     if TOPIC_BAR:
+        _log(f"removing topic bar: bar={TOPIC_BAR}")
         weechat.bar_remove(TOPIC_BAR)
         TOPIC_BAR = ""
+    else:
+        _log("topic bar removal skipped; no topic bar")
     if INSPECT_BAR_ITEM:
+        _log(f"removing inspect bar item: item={INSPECT_BAR_ITEM}")
         weechat.bar_item_remove(INSPECT_BAR_ITEM)
         INSPECT_BAR_ITEM = ""
+    else:
+        _log("inspect bar item removal skipped; no item")
 
 
 def _format_inspect_time(timestamp: int) -> str:
@@ -798,19 +1096,21 @@ def _colored_nick(nick: str) -> str:
     return f"{weechat.color(color)}{nick}{weechat.color('reset')}"
 
 
-def _debug(message: str) -> None:
-    if _option_bool("debug"):
-        weechat.prnt("", "meechat debug: " + message)
-
-
 def worker_process_cb(data: str, command: str, return_code: int, out: Any, err: Any) -> int:
     global WORKER_HOOK
 
     return_code = int(return_code)
+    out_len = len(out) if out else 0
+    err_len = len(err) if err else 0
+    _log(
+        "worker process callback: "
+        f"command={command} return_code={return_code} "
+        f"out_bytes={out_len} err_bytes={err_len} data={data!r}"
+    )
 
     if out:
         _consume_worker_output(out)
-    if err and _option_bool("debug"):
+    if err:
         if isinstance(err, bytes):
             err = err.decode("utf-8", errors="replace")
         for line in str(err).splitlines():
@@ -819,29 +1119,45 @@ def worker_process_cb(data: str, command: str, return_code: int, out: Any, err: 
     if return_code == weechat.WEECHAT_HOOK_PROCESS_ERROR:
         WORKER_HOOK = ""
         weechat.prnt("", f"meechat: failed to launch worker command {command}")
+        _log(f"worker launch failed: command={command}")
     elif return_code >= 0:
         WORKER_HOOK = ""
-        _debug(f"worker exited with code {return_code}")
+        _log(f"worker exited with code {return_code}")
 
     return weechat.WEECHAT_RC_OK
 
 
 def room_input_cb(data: str, buffer: str, input_data: str) -> int:
+    _log(
+        "room input received: "
+        f"buffer={buffer} data_room={_redacted_text(data)} "
+        f"input_len={len(input_data)} slash_command={input_data.startswith('/')}"
+    )
     if input_data.startswith("/"):
+        _log(f"room input dispatching WeeChat command: {_command_summary(input_data)}")
         weechat.command(buffer, input_data)
         return weechat.WEECHAT_RC_OK
 
     room_id = data or BUFFER_ROOMS.get(buffer, "")
     if not room_id:
+        _log("room input rejected because buffer is not mapped to a Matrix room")
         weechat.prnt(buffer, "meechat: this buffer is not mapped to a Matrix room")
         return weechat.WEECHAT_RC_OK
 
+    _log(
+        "room input sending Matrix message: "
+        f"room_id={_redacted_text(room_id)} body_len={len(input_data)}"
+    )
     _send_to_worker({"type": "send_message", "room_id": room_id, "body": input_data})
     return weechat.WEECHAT_RC_OK
 
 
 def room_close_cb(data: str, buffer: str) -> int:
     room_id = data or BUFFER_ROOMS.get(buffer, "")
+    _log(
+        "room close callback: "
+        f"buffer={buffer} room_id={_redacted_text(room_id)} data={_redacted_text(data)}"
+    )
     if room_id:
         _restore_inspect_highlight(room_id)
         ROOM_BUFFERS.pop(room_id, None)
@@ -850,83 +1166,116 @@ def room_close_cb(data: str, buffer: str) -> int:
         ROOM_READ_RECEIPTS.pop(room_id, None)
         ROOM_TOPICS.pop(room_id, None)
         _update_inspect_bar()
+        _log(
+            "room state removed: "
+            f"room_id={_redacted_text(room_id)} remaining_rooms={len(ROOM_BUFFERS)}"
+        )
     BUFFER_ROOMS.pop(buffer, None)
     return weechat.WEECHAT_RC_OK
 
 
 def script_unload_cb() -> int:
+    _log("script unload requested")
     _restore_all_inspect_highlights()
     if WORKER_HOOK:
+        _log(f"script unload sending worker shutdown: hook={WORKER_HOOK}")
         _send_to_worker({"type": "shutdown"})
+    else:
+        _log("script unload found no active worker hook")
     _remove_inspect_bar()
+    _log("script unload complete")
     return weechat.WEECHAT_RC_OK
 
 
 def command_cb(data: str, buffer: str, args: str) -> int:
     argv = args.strip().split()
     subcommand = argv[0].lower() if argv else "help"
+    _log(
+        "command received: "
+        f"buffer={buffer} data={data!r} subcommand={subcommand} "
+        f"args={_command_summary(args)!r}"
+    )
 
     if subcommand == "connect":
+        _log("command dispatch: connect")
         _connect()
         return weechat.WEECHAT_RC_OK
 
     if subcommand == "disconnect":
+        _log("command dispatch: disconnect")
         _disconnect()
         return weechat.WEECHAT_RC_OK
 
     if subcommand == "rooms":
+        _log("command dispatch: rooms")
         _send_to_worker({"type": "rooms"})
         return weechat.WEECHAT_RC_OK
 
     if subcommand == "inspect":
+        _log("command dispatch: inspect")
         _show_inspect(buffer)
         return weechat.WEECHAT_RC_OK
 
     if subcommand == "inspect-prev":
+        _log("command dispatch: inspect-prev")
         _inspect_step(buffer, -1)
         return weechat.WEECHAT_RC_OK
 
     if subcommand == "inspect-next":
+        _log("command dispatch: inspect-next")
         _inspect_step(buffer, 1)
         return weechat.WEECHAT_RC_OK
 
     if subcommand == "join":
         if len(argv) < 2:
+            _log("join command rejected; missing room argument")
             weechat.prnt(buffer, "usage: /meechat join <room-id-or-alias>")
         else:
+            _log(f"join command sending room={_redacted_text(argv[1])}")
             _send_to_worker({"type": "join", "room": argv[1]})
         return weechat.WEECHAT_RC_OK
 
     if subcommand in {"part", "leave"}:
         room_id = argv[1] if len(argv) > 1 else BUFFER_ROOMS.get(buffer, "")
         if not room_id:
+            _log("leave command rejected; no room id argument or buffer mapping")
             weechat.prnt(buffer, "usage: /meechat leave <room-id>")
         else:
+            _log(f"leave command sending room_id={_redacted_text(room_id)}")
             _send_to_worker({"type": "leave", "room_id": room_id})
         return weechat.WEECHAT_RC_OK
 
     if subcommand == "set":
         if len(argv) < 3:
+            _log("set command rejected; missing option or value")
             weechat.prnt(buffer, "usage: /meechat set <option> <value>")
         else:
             name = argv[1]
             if name not in DEFAULT_OPTIONS:
+                _log(f"set command rejected; unknown option={name}")
                 weechat.prnt(buffer, f"meechat: unknown option {name}")
             else:
                 weechat.config_set_plugin(name, args.split(None, 2)[2])
                 weechat.prnt(buffer, f"meechat: set {name}")
+                _log(
+                    "set command applied: "
+                    f"option={name} value={_option_value_summary(name, argv[2])}"
+                )
         return weechat.WEECHAT_RC_OK
 
     if subcommand == "status":
         status = "running" if WORKER_HOOK else "stopped"
         weechat.prnt(buffer, f"meechat: worker {status}")
+        _log(f"status command reported worker={status} hook={WORKER_HOOK}")
         return weechat.WEECHAT_RC_OK
 
+    _log(f"unknown or help command; printing help for subcommand={subcommand}")
     _print_help(buffer)
     return weechat.WEECHAT_RC_OK
 
 
 def _print_help(buffer: str) -> None:
+    _log(f"printing help into buffer={buffer}")
     weechat.prnt(buffer, "MeeChat commands:")
     weechat.prnt(buffer, "  /meechat connect")
     weechat.prnt(buffer, "  /meechat disconnect")
@@ -944,6 +1293,12 @@ def _register() -> None:
     if weechat is None:
         return
 
+    _log(
+        "startup: loading MeeChat "
+        f"name={SCRIPT_NAME} version={SCRIPT_VERSION} "
+        f"script_dir={SCRIPT_DIR} worker_path={_worker_path()} "
+        f"python={sys.executable} cwd={os.getcwd()}"
+    )
     if not weechat.register(
         SCRIPT_NAME,
         SCRIPT_AUTHOR,
@@ -953,9 +1308,12 @@ def _register() -> None:
         "script_unload_cb",
         "",
     ):
+        _log("startup: weechat.register returned false; script is not registered")
         return
 
+    _log("startup: weechat.register succeeded")
     _init_options()
+    _log("startup: registering /meechat command")
     weechat.hook_command(
         "meechat",
         "Matrix client adapter",
@@ -976,10 +1334,14 @@ def _register() -> None:
         "command_cb",
         "",
     )
+    _log("startup: /meechat command registered")
     _ensure_inspect_bar()
 
     if _option_bool("autoconnect"):
+        _log("startup: autoconnect is on; connecting")
         _connect()
+    else:
+        _log("startup: autoconnect is off")
 
 
 _register()

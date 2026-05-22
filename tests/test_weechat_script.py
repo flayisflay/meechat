@@ -136,7 +136,22 @@ def test_config_message_password_auth_ignores_stale_token_requirement(monkeypatc
     assert message["username"] == "alice"
     assert message["password"] == "secret"
     assert message["access_token"] == "STALE_TOKEN"
-    assert not fake.printed
+    printed = "\n".join(message for _buffer, message in fake.printed)
+    assert "config summary" in printed
+    assert "resolved_auth=password" in printed
+    assert "password_present=True" in printed
+    assert "access_token_present=True" in printed
+    assert "secret" not in printed
+    assert "STALE_TOKEN" not in printed
+
+
+def test_command_summary_redacts_secret_set_commands():
+    assert meechat._command_summary("set password secret value") == (
+        "set password <redacted>"
+    )
+    assert meechat._command_summary("/meechat set access_token SECRET") == (
+        "/meechat set access_token <redacted>"
+    )
 
 
 def test_print_matrix_message_uses_colored_display_name(monkeypatch):
