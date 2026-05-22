@@ -325,6 +325,10 @@ class MatrixWorker:
                 from nio import AsyncClientConfig as ClientConfig
             except ImportError:
                 from nio import ClientConfig  # type: ignore
+            try:
+                from nio import RoomTopicEvent
+            except ImportError:
+                RoomTopicEvent = None  # type: ignore[assignment]
             self.log("matrix-nio import succeeded")
         except ModuleNotFoundError:
             self.log("matrix-nio import failed; module is not installed")
@@ -410,6 +414,11 @@ class MatrixWorker:
 
         self.client.add_event_callback(self.on_room_message, RoomMessageText)
         self.log("room message event callback registered")
+        if RoomTopicEvent is not None:
+            self.client.add_event_callback(self.on_room_topic, RoomTopicEvent)
+            self.log("room topic event callback registered")
+        else:
+            self.log("room topic event callback unavailable in this nio version")
         add_ephemeral_callback = getattr(self.client, "add_ephemeral_callback", None)
         if add_ephemeral_callback is not None:
             add_ephemeral_callback(self.on_receipt, ReceiptEvent)
@@ -569,6 +578,25 @@ class MatrixWorker:
                 "body": body,
                 "event_id": getattr(event, "event_id", ""),
                 "server_timestamp": getattr(event, "server_timestamp", 0),
+            }
+        )
+
+    async def on_room_topic(self, room: Any, event: Any) -> None:
+        room_id = getattr(room, "room_id", "")
+        if not room_id:
+            self.log("room topic event skipped; room_id empty")
+            return
+
+        topic = str(getattr(event, "topic", "") or _room_topic(room))
+        self.log(
+            "room topic event emitting: "
+            f"room_id={_redacted_text(room_id)} topic_len={len(topic)}"
+        )
+        await self.emit(
+            {
+                "type": "room_topic",
+                "room_id": room_id,
+                "topic": topic,
             }
         )
 

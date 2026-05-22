@@ -79,6 +79,7 @@ INSPECT_ACTION_STATE: dict[str, dict[str, Any]] = {}
 INSPECT_ACTIVE_ROOMS: set[str] = set()
 INSPECT_BAR_ITEM = ""
 INSPECT_BAR = ""
+TOPIC_BAR_ITEM = ""
 TOPIC_BAR = ""
 INSPECT_HISTORY_LIMIT = 500
 INSPECT_TOGGLE_KEY = "ctrl-G"
@@ -445,6 +446,13 @@ def _handle_worker_message(message: dict[str, Any]) -> None:
         )
         return
 
+    if message_type == "room_topic":
+        _record_room_topic(
+            str(message.get("room_id") or ""),
+            str(message.get("topic") or ""),
+        )
+        return
+
     if message_type == "message":
         _print_matrix_message(message)
         return
@@ -530,6 +538,27 @@ def _record_room(
     return buffer
 
 
+def _record_room_topic(room_id: str, topic: str) -> None:
+    if not room_id:
+        _log("ignoring room topic with empty room_id")
+        return
+
+    ROOM_TOPICS[room_id] = topic
+    buffer = _buffer_for_room(room_id)
+    if buffer:
+        _log(
+            "updating room topic: "
+            f"room_id={_redacted_text(room_id)} topic_len={len(topic)}"
+        )
+        weechat.buffer_set(buffer, "title", "")
+    else:
+        _log(
+            "recorded room topic without buffer: "
+            f"room_id={_redacted_text(room_id)} topic_len={len(topic)}"
+        )
+    _update_topic_bar()
+
+
 def _buffer_for_room(room_id: str) -> str:
     return ROOM_BUFFERS.get(room_id, "")
 
@@ -578,7 +607,7 @@ def _update_room_buffer(
     weechat.buffer_set(buffer, "short_name", short_name)
     if topic is not None:
         ROOM_TOPICS[room_id] = topic
-    weechat.buffer_set(buffer, "title", ROOM_TOPICS.get(room_id, ""))
+    weechat.buffer_set(buffer, "title", "")
     weechat.buffer_set(buffer, "localvar_set_type", "matrix")
     weechat.buffer_set(buffer, "localvar_set_meechat", "1")
     weechat.buffer_set(
@@ -598,6 +627,7 @@ def _update_room_buffer(
         f"buffer={buffer} short_name={short_name!r} "
         f"title_len={len(ROOM_TOPICS.get(room_id, ''))}"
     )
+    _update_topic_bar()
 
 
 def _set_inspect_mode_keys(buffer: str, enabled: bool) -> None:
@@ -636,12 +666,10 @@ def _rehydrate_room_buffers() -> None:
                 continue
 
             room_name = weechat.buffer_get_string(buffer, "short_name") or room_id
-            topic = weechat.buffer_get_string(buffer, "title")
             ROOM_BUFFERS[room_id] = buffer
             BUFFER_ROOMS[buffer] = room_id
             ROOM_NAMES[room_id] = room_name
-            ROOM_TOPICS[room_id] = topic
-            _update_room_buffer(buffer, room_id, room_name, topic=topic)
+            _update_room_buffer(buffer, room_id, room_name)
             count += 1
     finally:
         weechat.infolist_free(infolist)
@@ -1339,6 +1367,7 @@ def _ensure_inspect_bar() -> None:
         _log(f"inspect bar item already exists: item={INSPECT_BAR_ITEM}")
 
     if not INSPECT_BAR:
+        _remove_existing_bar("meechat_inspect")
         _log("creating inspect bar")
         INSPECT_BAR = weechat.bar_new(
             "meechat_inspect",
@@ -1370,12 +1399,24 @@ def _ensure_inspect_bar() -> None:
 
 
 def _ensure_topic_bar() -> None:
-    global TOPIC_BAR
+    global TOPIC_BAR, TOPIC_BAR_ITEM
+
+    if not TOPIC_BAR_ITEM:
+        _log("creating topic bar item")
+        TOPIC_BAR_ITEM = weechat.bar_item_new(
+            "(extra)meechat_topic",
+            "topic_bar_item_cb",
+            "",
+        )
+        _log(f"topic bar item result: item={TOPIC_BAR_ITEM}")
+    else:
+        _log(f"topic bar item already exists: item={TOPIC_BAR_ITEM}")
 
     if TOPIC_BAR:
         _log(f"topic bar already exists: bar={TOPIC_BAR}")
         return
 
+    _remove_existing_bar("meechat_topic")
     _log("creating topic bar")
     TOPIC_BAR = weechat.bar_new(
         "meechat_topic",
@@ -1393,7 +1434,7 @@ def _ensure_topic_bar() -> None:
         "darkblue",
         "default",
         "on",
-        "buffer_title",
+        "meechat_topic",
     )
     if not TOPIC_BAR:
         weechat.prnt("", "meechat: failed to create topic bar")
@@ -1402,9 +1443,28 @@ def _ensure_topic_bar() -> None:
         _log(f"topic bar created: bar={TOPIC_BAR}")
 
 
+def _remove_existing_bar(name: str) -> None:
+    if not hasattr(weechat, "bar_search"):
+        _log(f"stale bar removal skipped; bar_search unavailable: name={name}")
+        return
+
+    bar = weechat.bar_search(name)
+    if not bar:
+        _log(f"no existing bar to remove: name={name}")
+        return
+
+    _log(f"removing existing bar before recreate: name={name} bar={bar}")
+    weechat.bar_remove(bar)
+
+
 def _update_inspect_bar() -> None:
     if INSPECT_BAR_ITEM:
         weechat.bar_item_update("meechat_inspect")
+
+
+def _update_topic_bar() -> None:
+    if TOPIC_BAR_ITEM:
+        weechat.bar_item_update("meechat_topic")
 
 
 def inspect_bar_item_cb(
@@ -1418,6 +1478,19 @@ def inspect_bar_item_cb(
     if not room_id or room_id not in INSPECT_ACTIVE_ROOMS:
         return ""
     return _inspect_text(room_id)
+
+
+def topic_bar_item_cb(
+    data: str,
+    item: str,
+    window: str,
+    buffer: str,
+    extra_info: dict[str, str],
+) -> str:
+    room_id = BUFFER_ROOMS.get(buffer, "")
+    if not room_id:
+        return ""
+    return ROOM_TOPICS.get(room_id, "")
 
 
 def _inspect_text(room_id: str) -> str:
@@ -1547,7 +1620,7 @@ def _single_line_body(body: str) -> str:
 
 
 def _remove_inspect_bar() -> None:
-    global INSPECT_BAR, INSPECT_BAR_ITEM, TOPIC_BAR
+    global INSPECT_BAR, INSPECT_BAR_ITEM, TOPIC_BAR, TOPIC_BAR_ITEM
 
     if INSPECT_BAR:
         _log(f"removing inspect bar: bar={INSPECT_BAR}")
@@ -1561,6 +1634,12 @@ def _remove_inspect_bar() -> None:
         TOPIC_BAR = ""
     else:
         _log("topic bar removal skipped; no topic bar")
+    if TOPIC_BAR_ITEM:
+        _log(f"removing topic bar item: item={TOPIC_BAR_ITEM}")
+        weechat.bar_item_remove(TOPIC_BAR_ITEM)
+        TOPIC_BAR_ITEM = ""
+    else:
+        _log("topic bar item removal skipped; no item")
     if INSPECT_BAR_ITEM:
         _log(f"removing inspect bar item: item={INSPECT_BAR_ITEM}")
         weechat.bar_item_remove(INSPECT_BAR_ITEM)

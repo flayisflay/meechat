@@ -16,6 +16,7 @@ class FakeWeechat:
         self.commands = []
         self.bar_items = []
         self.bars = []
+        self.existing_bars = {}
         self.bar_item_updates = []
         self.removed_bars = []
         self.removed_bar_items = []
@@ -95,11 +96,17 @@ class FakeWeechat:
         self.bars.append(args)
         return "bar"
 
+    def bar_search(self, name):
+        return self.existing_bars.get(name, "")
+
     def bar_item_update(self, name):
         self.bar_item_updates.append(name)
 
     def bar_remove(self, bar):
         self.removed_bars.append(bar)
+        for name, pointer in list(self.existing_bars.items()):
+            if pointer == bar:
+                del self.existing_bars[name]
 
     def bar_item_remove(self, item):
         self.removed_bar_items.append(item)
@@ -170,6 +177,7 @@ def fresh_meechat(monkeypatch):
         ("INSPECT_ACTIVE_ROOMS", set()),
         ("INSPECT_BAR_ITEM", ""),
         ("INSPECT_BAR", ""),
+        ("TOPIC_BAR_ITEM", ""),
         ("TOPIC_BAR", ""),
     ):
         monkeypatch.setattr(meechat, name, value)
@@ -251,13 +259,15 @@ def test_print_matrix_message_uses_colored_display_name(fresh_meechat):
     assert (
         "buffer",
         "title",
-        "Only the topic",
+        "",
     ) in fake.buffer_properties
     assert (
         "buffer",
         "title",
         "Matrix: General (!room:example)",
     ) not in fake.buffer_properties
+    meechat._ensure_topic_bar()
+    assert meechat.topic_bar_item_cb("", "", "", "buffer", {}) == "Only the topic"
 
 
 def test_inspect_monitor_steps_through_room_messages(fresh_meechat):
@@ -284,6 +294,7 @@ def test_inspect_monitor_steps_through_room_messages(fresh_meechat):
     assert meechat.INSPECT_BAR == "bar"
     assert fake.bar_items == [
         ("(extra)meechat_inspect", "inspect_bar_item_cb", ""),
+        ("(extra)meechat_topic", "topic_bar_item_cb", ""),
     ]
     assert fake.bars[0][0] == "meechat_inspect"
     assert fake.bars[0][2] == "100"
@@ -293,7 +304,7 @@ def test_inspect_monitor_steps_through_room_messages(fresh_meechat):
     assert fake.bars[1][2] == "99"
     assert fake.bars[1][5] == "top"
     assert fake.bars[1][12] == "darkblue"
-    assert fake.bars[1][15] == "buffer_title"
+    assert fake.bars[1][15] == "meechat_topic"
     assert "meechat_inspect" in fake.bar_item_updates
 
     rendered = meechat.inspect_bar_item_cb("", "", "", "buffer", {})
@@ -627,7 +638,7 @@ def test_room_buffer_binds_inspect_navigation_and_creates_top_monitor(fresh_meec
     assert fake.bars[1][0] == "meechat_topic"
     assert fake.bars[1][5] == "top"
     assert fake.bars[1][12] == "darkblue"
-    assert fake.bars[1][15] == "buffer_title"
+    assert fake.bars[1][15] == "meechat_topic"
 
 
 def test_startup_rehydrates_existing_room_buffers(fresh_meechat):
@@ -646,7 +657,8 @@ def test_startup_rehydrates_existing_room_buffers(fresh_meechat):
     assert meechat.ROOM_BUFFERS["!room:example.org"] == "buffer"
     assert meechat.BUFFER_ROOMS["buffer"] == "!room:example.org"
     assert meechat.ROOM_NAMES["!room:example.org"] == "Test Room"
-    assert meechat.ROOM_TOPICS["!room:example.org"] == "Room topic"
+    assert "!room:example.org" not in meechat.ROOM_TOPICS
+    assert ("buffer", "title", "") in fake.buffer_properties
     assert ("buffer", "localvar_set_meechat", "1") in fake.buffer_properties
     assert ("buffer", "localvar_set_meechat_inspect", "0") in fake.buffer_properties
     assert (
@@ -661,3 +673,42 @@ def test_startup_rehydrates_existing_room_buffers(fresh_meechat):
             "/meechat inspect-cancel",
         ) in fake.buffer_properties
     assert fake.freed_infolists == ["infolist:buffer"]
+
+
+def test_room_topic_updates_current_topic_bar(fresh_meechat):
+    fake = fresh_meechat
+    meechat._print_matrix_message(
+        {
+            "room_id": "!room:example",
+            "room_name": "General",
+            "room_topic": "Old topic",
+            "sender": "@alice:example",
+            "sender_display_name": "Alice",
+            "body": "hello",
+            "server_timestamp": 123000,
+        }
+    )
+    meechat._ensure_topic_bar()
+
+    assert meechat.topic_bar_item_cb("", "", "", "buffer", {}) == "Old topic"
+
+    meechat._record_room_topic("!room:example", "Current topic")
+
+    assert meechat.topic_bar_item_cb("", "", "", "buffer", {}) == "Current topic"
+    assert ("buffer", "title", "") in fake.buffer_properties
+    assert "meechat_topic" in fake.bar_item_updates
+
+
+def test_topic_bar_replaces_stale_reload_bar(fresh_meechat):
+    fake = fresh_meechat
+    fake.existing_bars = {
+        "meechat_inspect": "old-inspect-bar",
+        "meechat_topic": "old-topic-bar",
+    }
+
+    meechat._ensure_inspect_bar()
+
+    assert "old-inspect-bar" in fake.removed_bars
+    assert "old-topic-bar" in fake.removed_bars
+    assert fake.bars[0][0] == "meechat_inspect"
+    assert fake.bars[1][0] == "meechat_topic"

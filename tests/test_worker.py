@@ -200,6 +200,7 @@ def test_connect_logs_in_with_password(monkeypatch):
             AsyncClientConfig=FakeClientConfig,
             ReceiptEvent=object,
             RoomMessageText=object,
+            RoomTopicEvent=object,
         )
         monkeypatch.setitem(sys.modules, "nio", fake_nio)
 
@@ -237,6 +238,64 @@ def test_connect_logs_in_with_password(monkeypatch):
     asyncio.run(run_test())
 
 
+def test_connect_allows_nio_without_room_topic_event(monkeypatch):
+    async def run_test():
+        class FakeClientConfig:
+            def __init__(self, *, store_sync_tokens):
+                self.store_sync_tokens = store_sync_tokens
+
+        class FakeClient:
+            instances = []
+
+            def __init__(self, homeserver, user, *, device_id, store_path, config):
+                self.callback_calls = []
+                self.ephemeral_callback_calls = []
+                FakeClient.instances.append(self)
+
+            def restore_login(self, user_id, device_id, access_token):
+                self.user_id = user_id
+                self.device_id = device_id
+                self.access_token = access_token
+
+            def add_event_callback(self, callback, event_type):
+                self.callback_calls.append((callback, event_type))
+
+            def add_ephemeral_callback(self, callback, event_type):
+                self.ephemeral_callback_calls.append((callback, event_type))
+
+        fake_nio = SimpleNamespace(
+            AsyncClient=FakeClient,
+            AsyncClientConfig=FakeClientConfig,
+            ReceiptEvent=object,
+            RoomMessageText=object,
+        )
+        monkeypatch.setitem(sys.modules, "nio", fake_nio)
+
+        worker = MatrixWorker(stdout=io.StringIO())
+        worker.config = WorkerConfig(
+            auth="token",
+            homeserver="https://matrix.example",
+            user_id="@alice:example",
+            access_token="TOKEN",
+            device_id="DEVICE",
+        )
+
+        async def fake_sync_loop():
+            return None
+
+        worker.sync_loop = fake_sync_loop  # type: ignore[method-assign]
+
+        await worker.connect()
+        assert worker.sync_task is not None
+        await worker.sync_task
+
+        client = FakeClient.instances[0]
+        assert len(client.callback_calls) == 1
+        assert client.callback_calls[0][0] == worker.on_room_message
+
+    asyncio.run(run_test())
+
+
 def test_on_room_message_emits_sender_display_name():
     async def run_test():
         user = SimpleNamespace(display_name="Alice")
@@ -261,6 +320,29 @@ def test_on_room_message_emits_sender_display_name():
         assert message["sender"] == "@alice:example"
         assert message["sender_display_name"] == "Alice"
         assert message["room_topic"] == "A focused room topic"
+
+    asyncio.run(run_test())
+
+
+def test_on_room_topic_emits_current_topic():
+    async def run_test():
+        room = SimpleNamespace(
+            room_id="!room:example",
+            display_name="General",
+            topic="Old topic",
+        )
+        event = SimpleNamespace(topic="Current topic")
+        stdout = io.StringIO()
+        worker = MatrixWorker(stdout=stdout)
+
+        await worker.on_room_topic(room, event)
+
+        message = loads(stdout.getvalue())
+        assert message == {
+            "type": "room_topic",
+            "room_id": "!room:example",
+            "topic": "Current topic",
+        }
 
     asyncio.run(run_test())
 

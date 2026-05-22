@@ -158,9 +158,9 @@ the action letter or arrow keys, press `Enter`, then complete the prompted input
 `Ctrl+G` again exits inspect mode and clears the message marker; `Esc` also exits
 inspect mode.
 
-MeeChat also adds a `meechat_topic` title bar below the monitor using WeeChat's
-`buffer_title` item, populated only with the room topic and using a dark blue
-title-bar background. The monitor includes a bottom read-receipts row using the
+MeeChat also adds a `meechat_topic` title bar below the monitor, populated only
+from the current Matrix room topic and using a dark blue title-bar background.
+The monitor includes a bottom read-receipts row using the
 colored first three characters of each reader's display name. While inspecting,
 the selected message is temporarily marked in the room buffer.
 
