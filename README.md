@@ -161,8 +161,9 @@ inspect mode.
 MeeChat also adds a `meechat_topic` title bar below the monitor, populated only
 from the current Matrix room topic and using a dark blue title-bar background.
 The monitor includes a bottom read-receipts row using the
-colored first three characters of each reader's display name. While inspecting,
-the selected message is temporarily marked in the room buffer.
+colored first four characters of each reader's display name. The message counter
+appears beside the bottom enter prompt. While inspecting, the selected message is
+temporarily marked in the room buffer.
 
 Run tests:
 

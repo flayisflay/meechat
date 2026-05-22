@@ -374,25 +374,30 @@ def test_inspect_monitor_steps_through_room_messages(fresh_meechat):
     rendered = meechat.inspect_bar_item_cb("", "", "", "buffer", {})
     assert "room:" not in rendered
     assert rendered.splitlines()[0].startswith("time: ")
-    assert rendered.splitlines()[0].endswith(" | sender: Bob | user: @bob:example")
-    assert "message: 2/2" in rendered
+    assert rendered.splitlines()[0].endswith(
+        " | sender: Bob | user: @bob:example"
+    )
+    assert "message:" not in rendered
     assert "sender: Bob" in rendered
     assert "user: @bob:example" in rendered
     assert "event:" not in rendered
     assert "body: second" in rendered
     assert "read receipts:" in rendered
-    assert "enter: select message" in rendered
+    assert "2/2 | enter: select message" in rendered
     assert "\nactions:" not in rendered
 
     meechat.command_cb("", "buffer", "inspect-prev")
 
     rendered = meechat.inspect_bar_item_cb("", "", "", "buffer", {})
-    assert "message: 1/2" in rendered
+    assert rendered.splitlines()[0].endswith(
+        " | sender: Alice | user: @alice:example"
+    )
+    assert "message:" not in rendered
     assert "sender: Alice" in rendered
     assert "user: @alice:example" in rendered
     assert "event:" not in rendered
     assert "body: first" in rendered
-    assert "enter: select message" in rendered
+    assert "1/2 | enter: select message" in rendered
 
 
 def test_inspect_monitor_shows_colored_read_receipts(fresh_meechat):
@@ -423,12 +428,12 @@ def test_inspect_monitor_shows_colored_read_receipts(fresh_meechat):
     meechat.command_cb("", "buffer", "inspect")
 
     rendered = meechat.inspect_bar_item_cb("", "", "", "buffer", {})
-    assert "read receipts: <red>Bea<reset> <red>Cha<reset>" in rendered
+    assert "read receipts: <red>Beat<reset> <red>Char<reset>" in rendered
 
     meechat.command_cb("", "buffer", "inspect-prev")
 
     rendered = meechat.inspect_bar_item_cb("", "", "", "buffer", {})
-    assert "read receipts: <red>Bea<reset> <red>Cha<reset>" in rendered
+    assert "read receipts: <red>Beat<reset> <red>Char<reset>" in rendered
 
 
 def test_inspect_monitor_shows_reactions_with_counts_and_senders(fresh_meechat):
@@ -630,7 +635,10 @@ def test_backfill_prepends_history_and_selects_next_older_message(
     assert meechat.ROOM_INSPECT_INDEX["!room:example"] == 1
     assert fake.cleared_buffers == ["buffer"]
     rendered = meechat.inspect_bar_item_cb("", "", "", "buffer", {})
-    assert "message: 2/4" in rendered
+    assert rendered.splitlines()[0].endswith(
+        " | sender: Carol | user: @carol:example"
+    )
+    assert "2/4 | enter: select message" in rendered
     assert "sender: Carol" in rendered
     assert "body: older two" in rendered
     assert fake.line_data["line-data-4"]["message"] == "<reverse>older two<reset>"
@@ -652,7 +660,13 @@ def test_ctrl_g_toggles_monitor_and_selector(fresh_meechat):
         "1",
     ) in fake.buffer_properties
     assert fake.line_data["line-data-1"]["prefix"].startswith("<reverse>>> ")
-    assert "message: 1/1" in meechat.inspect_bar_item_cb("", "", "", "buffer", {})
+    assert "1/1 | enter: select message" in meechat.inspect_bar_item_cb(
+        "",
+        "",
+        "",
+        "buffer",
+        {},
+    )
 
     meechat.command_cb("", "buffer", "inspect-toggle")
 

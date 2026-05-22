@@ -1931,7 +1931,6 @@ def _inspect_text(room_id: str) -> str:
 
     lines = [
         " | ".join(meta_parts),
-        f"message: {index + 1}/{len(messages)}",
     ]
     history_line = _inspect_history_line(room_id, at_oldest=index == 0)
     if history_line:
@@ -1939,7 +1938,7 @@ def _inspect_text(room_id: str) -> str:
     lines.append(f"body: {body}")
     lines.append("reactions: " + _format_reactions(room_id, event_id))
     lines.append("read receipts: " + _format_read_receipts(receipts))
-    lines.extend(_inspect_action_lines(room_id))
+    lines.extend(_inspect_action_lines(room_id, f"{index + 1}/{len(messages)}"))
     return "\n".join(lines)
 
 
@@ -1951,23 +1950,24 @@ def _inspect_history_line(room_id: str, *, at_oldest: bool) -> str:
     return ""
 
 
-def _inspect_action_lines(room_id: str) -> list[str]:
+def _inspect_action_lines(room_id: str, counter: str = "") -> list[str]:
     state = INSPECT_ACTION_STATE.get(room_id, {})
     mode = state.get("mode")
+    enter_prefix = f"{counter} | " if counter else ""
     if mode == "menu":
         return [
             "selected: message options",
             "actions: " + _format_inspect_action_menu(room_id),
-            "enter: choose | letters/arrows: select | Ctrl-G: cancel",
+            enter_prefix + "enter: choose | letters/arrows: select | Ctrl-G: cancel",
         ]
     if mode == "prompt":
         action = str(state.get("action") or "")
         prompt = str(state.get("prompt") or action)
         return [
             f"action: {action} | input: {prompt}",
-            "enter: finish | Ctrl-G: cancel",
+            enter_prefix + "enter: finish | Ctrl-G: cancel",
         ]
-    return ["enter: select message"]
+    return [enter_prefix + "enter: select message"]
 
 
 def _format_inspect_action_menu(room_id: str) -> str:
@@ -2056,7 +2056,7 @@ def _reaction_sort_key(reaction: dict[str, Any]) -> tuple[int, str]:
 
 
 def _colored_receipt_label(display_name: str) -> str:
-    label = display_name.strip()[:3]
+    label = display_name.strip()[:4]
     if not label:
         return ""
 
