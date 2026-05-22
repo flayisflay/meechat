@@ -248,7 +248,7 @@ def test_inspect_monitor_steps_through_room_messages(monkeypatch):
     assert fake.bars[0][0] == "meechat_inspect"
     assert fake.bars[0][2] == "100"
     assert fake.bars[0][5] == "top"
-    assert fake.bars[0][9] == "8"
+    assert fake.bars[0][9] == "9"
     assert fake.bars[1][0] == "meechat_topic"
     assert fake.bars[1][2] == "99"
     assert fake.bars[1][5] == "top"
@@ -263,14 +263,8 @@ def test_inspect_monitor_steps_through_room_messages(monkeypatch):
     assert "event: $two" in rendered
     assert "body: second" in rendered
     assert "read receipts:" in rendered
-    assert "actions:" in rendered
-    assert "[r]eply" in rendered
-    assert "reply in [t]hread" in rendered
-    assert "[e]dit" in rendered
-    assert "[a]dd reaction" in rendered
-    assert "remo[v]e" in rendered
-    assert "[p]ermalink" in rendered
-    assert "enter: choose action" in rendered
+    assert "enter: select message" in rendered
+    assert "actions:" not in rendered
 
     meechat.command_cb("", "buffer", "inspect-prev")
 
@@ -279,6 +273,7 @@ def test_inspect_monitor_steps_through_room_messages(monkeypatch):
     assert "sender: Alice" in rendered
     assert "event: $one" in rendered
     assert "body: first" in rendered
+    assert "enter: select message" in rendered
 
 
 def test_inspect_monitor_shows_colored_read_receipts(monkeypatch):
@@ -341,7 +336,7 @@ def test_inspect_monitor_shows_colored_read_receipts(monkeypatch):
     assert "read receipts: <red>Bea<reset> <red>Cha<reset>" in rendered
 
 
-def test_inspect_navigation_marks_selected_room_line(monkeypatch):
+def test_inspect_navigation_moves_cursor_before_enter(monkeypatch):
     fake = FakeWeechat()
     monkeypatch.setattr(meechat, "weechat", fake)
     monkeypatch.setattr(meechat, "ROOM_BUFFERS", {})
@@ -379,6 +374,9 @@ def test_inspect_navigation_marks_selected_room_line(monkeypatch):
 
     assert fake.line_data["line-data-2"]["prefix"].startswith("<reverse>>> ")
     assert fake.line_data["line-data-2"]["message"] == "<reverse>second<reset>"
+    rendered = meechat.inspect_bar_item_cb("", "", "", "buffer", {})
+    assert "enter: select message" in rendered
+    assert "actions:" not in rendered
 
     meechat.command_cb("", "buffer", "inspect-prev")
 
@@ -386,6 +384,19 @@ def test_inspect_navigation_marks_selected_room_line(monkeypatch):
         "prefix": "<red>Bob<reset>",
         "message": "second",
     }
+    assert fake.line_data["line-data-1"]["prefix"].startswith("<reverse>>> ")
+    assert fake.line_data["line-data-1"]["message"] == "<reverse>first<reset>"
+
+    meechat.command_cb("", "buffer", "inspect-enter")
+
+    assert fake.line_data["line-data-1"]["prefix"].startswith("<reverse>>> ")
+    assert fake.line_data["line-data-1"]["message"] == "<reverse>first<reset>"
+    rendered = meechat.inspect_bar_item_cb("", "", "", "buffer", {})
+    assert "selected: message options" in rendered
+    assert "actions:" in rendered
+
+    meechat.command_cb("", "buffer", "inspect-cancel")
+
     assert fake.line_data["line-data-1"]["prefix"].startswith("<reverse>>> ")
     assert fake.line_data["line-data-1"]["message"] == "<reverse>first<reset>"
 
@@ -424,6 +435,7 @@ def test_inspect_enter_menu_completes_edit_action(monkeypatch):
     meechat.command_cb("", "buffer", "inspect-enter")
 
     rendered = meechat.inspect_bar_item_cb("", "", "", "buffer", {})
+    assert "selected: message options" in rendered
     assert "actions:" in rendered
     assert "[r]eply" in rendered
     assert (

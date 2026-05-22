@@ -704,6 +704,7 @@ def _show_inspect(buffer: str) -> None:
 
     _ensure_inspect_bar()
     _select_inspect_room(room_id)
+    _clear_inspect_selection(buffer, room_id)
     _highlight_inspect_message(room_id)
     _update_inspect_bar()
 
@@ -722,6 +723,7 @@ def _inspect_step(buffer: str, direction: int) -> None:
 
     _ensure_inspect_bar()
     _select_inspect_room(room_id)
+    _clear_inspect_selection(buffer, room_id)
     messages = ROOM_MESSAGES.get(room_id, [])
     if messages:
         index = ROOM_INSPECT_INDEX.get(room_id, len(messages) - 1)
@@ -874,6 +876,7 @@ def _open_inspect_action_menu(buffer: str, room_id: str) -> None:
     )
     _set_inspect_action_keys(buffer, True)
     INSPECT_ACTION_STATE[room_id] = {"mode": "menu", "selected": 0}
+    _highlight_inspect_message(room_id)
     _update_inspect_bar()
 
 
@@ -986,6 +989,14 @@ def _exit_inspect_action_mode(buffer: str, room_id: str) -> None:
     _log(f"inspect action mode exited: room_id={_redacted_text(room_id)}")
     _set_inspect_action_keys(buffer, False)
     _update_inspect_bar()
+
+
+def _clear_inspect_selection(buffer: str, room_id: str) -> None:
+    if room_id in INSPECT_ACTION_STATE:
+        _log(f"clearing inspect selection: room_id={_redacted_text(room_id)}")
+        INSPECT_ACTION_STATE.pop(room_id, None)
+        _set_inspect_action_keys(buffer, False)
+    _restore_inspect_highlight(room_id)
 
 
 def _clear_all_inspect_action_modes() -> None:
@@ -1208,7 +1219,7 @@ def _ensure_inspect_bar() -> None:
             "vertical",
             "vertical",
             "0",
-            "8",
+            "9",
             "default",
             "default",
             "default",
@@ -1335,6 +1346,7 @@ def _inspect_action_lines(room_id: str) -> list[str]:
     mode = state.get("mode")
     if mode == "menu":
         return [
+            "selected: message options",
             "actions: " + _format_inspect_action_menu(room_id),
             "enter: choose | letters/arrows: select | Ctrl-G: cancel",
         ]
@@ -1345,10 +1357,7 @@ def _inspect_action_lines(room_id: str) -> list[str]:
             f"action: {action} | input: {prompt}",
             "enter: finish | Ctrl-G: cancel",
         ]
-    return [
-        "actions: " + _format_inspect_action_list(),
-        "enter: choose action",
-    ]
+    return ["enter: select message"]
 
 
 def _format_inspect_action_menu(room_id: str) -> str:
@@ -1362,10 +1371,6 @@ def _format_inspect_action_menu(room_id: str) -> str:
             label = f"{weechat.color('reverse')}{label}{reset}"
         parts.append(label)
     return "  ".join(parts)
-
-
-def _format_inspect_action_list() -> str:
-    return "  ".join(str(action["label"]) for action in INSPECT_ACTIONS)
 
 
 def _read_receipts_for_message(
