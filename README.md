@@ -62,7 +62,7 @@ After changing `meechat.py`, reload it from WeeChat:
 
 ## Configure
 
-Store your Matrix access token securely:
+You can connect with an existing Matrix access token:
 
 ```text
 /secure set meechat_access_token <access-token>
@@ -76,6 +76,29 @@ Set the required Matrix options:
 /set plugins.var.python.meechat.user_id "@alice:example.org"
 /set plugins.var.python.meechat.device_id "DEVICEID"
 ```
+
+Or connect with Matrix username/password login:
+
+```text
+/secure set meechat_password <password>
+/set plugins.var.python.meechat.password "${sec.data.meechat_password}"
+/set plugins.var.python.meechat.username "alice"
+/set plugins.var.python.meechat.auth "password"
+/set plugins.var.python.meechat.access_token ""
+/set plugins.var.python.meechat.homeserver "https://matrix.example.org"
+```
+
+`username` can be a localpart, email address, or full Matrix user ID. If
+`username` is empty, MeeChat uses `user_id` for password login. `device_id` is
+optional for password login; setting it gives MeeChat a stable Matrix device ID.
+`auth` can be `auto`, `token`, or `password`; `auto` uses password login when a
+password is configured, otherwise it uses token auth.
+
+If `/meechat connect` reports `M_UNKNOWN_TOKEN` while `auth` is `token`, the
+homeserver rejected the configured access token. If it happens while `auth` is
+`password`, the homeserver rejected the token returned by the password login
+request, which usually means the session was invalidated immediately or the
+homeserver/login details do not match.
 
 ## Run
 

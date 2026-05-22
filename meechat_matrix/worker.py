@@ -25,20 +25,46 @@ from meechat_matrix.protocol import ProtocolError, dumps, loads
 
 @dataclass(slots=True)
 class WorkerConfig:
+    auth: str
     homeserver: str
     user_id: str
     access_token: str
     device_id: str
+    username: str = ""
+    password: str = ""
     store_path: str = ""
     sync_timeout_ms: int = 30000
 
     @classmethod
     def from_message(cls, message: dict[str, Any]) -> "WorkerConfig":
-        missing = [
-            key
-            for key in ("homeserver", "user_id", "access_token", "device_id")
-            if not str(message.get(key, "")).strip()
-        ]
+        auth = str(message.get("auth") or "auto").strip().lower()
+        homeserver = str(message.get("homeserver") or "").strip()
+        user_id = str(message.get("user_id") or "").strip()
+        access_token = str(message.get("access_token") or "").strip()
+        device_id = str(message.get("device_id") or "").strip()
+        username = str(message.get("username") or user_id).strip()
+        password = str(message.get("password") or "").strip()
+
+        missing = []
+        if auth not in {"auto", "token", "password"}:
+            missing.append("auth must be auto, token, or password")
+        if not homeserver:
+            missing.append("homeserver")
+        use_password = auth == "password" or (auth == "auto" and password)
+        use_token = auth == "token" or (auth == "auto" and not use_password)
+        if use_password:
+            if not password:
+                missing.append("password")
+            if not username:
+                missing.append("username")
+        elif use_token:
+            if not access_token:
+                missing.append("access_token")
+            if not user_id:
+                missing.append("user_id")
+            if not device_id:
+                missing.append("device_id")
+
         if missing:
             raise ProtocolError("missing config field(s): " + ", ".join(missing))
 
@@ -51,13 +77,20 @@ class WorkerConfig:
             raise ProtocolError("sync_timeout_ms must be at least 1000")
 
         return cls(
-            homeserver=str(message["homeserver"]).strip(),
-            user_id=str(message["user_id"]).strip(),
-            access_token=str(message["access_token"]).strip(),
-            device_id=str(message["device_id"]).strip(),
+            auth=auth,
+            homeserver=homeserver,
+            user_id=user_id,
+            access_token=access_token,
+            device_id=device_id,
+            username=username,
+            password=password,
             store_path=str(message.get("store_path") or "").strip(),
             sync_timeout_ms=sync_timeout_ms,
         )
+
+    @property
+    def use_password_login(self) -> bool:
+        return self.auth == "password" or (self.auth == "auto" and bool(self.password))
 
 
 class MatrixWorker:
@@ -75,6 +108,7 @@ class MatrixWorker:
         self.config: WorkerConfig | None = None
         self.client: Any | None = None
         self.sync_task: asyncio.Task[None] | None = None
+        self.connected = False
         self.stopping = asyncio.Event()
         self._write_lock = asyncio.Lock()
 
@@ -150,7 +184,13 @@ class MatrixWorker:
             return
 
         if self.client is not None:
-            await self.emit({"type": "connected", "user_id": self.config.user_id})
+            if self.connected:
+                await self.emit({"type": "connected", "user_id": self.config.user_id})
+            else:
+                await self.emit_error(
+                    "connection attempt already in progress",
+                    where="connect",
+                )
             return
 
         try:
@@ -169,43 +209,73 @@ class MatrixWorker:
             return
 
         nio_config = ClientConfig(store_sync_tokens=True)
+        client_user = self.config.username or self.config.user_id
         self.client = AsyncClient(
             self.config.homeserver,
-            self.config.user_id,
+            client_user,
             device_id=self.config.device_id,
             store_path=self.config.store_path,
             config=nio_config,
         )
 
-        if hasattr(self.client, "restore_login"):
+        if not self.config.use_password_login and hasattr(self.client, "restore_login"):
             self.client.restore_login(
                 self.config.user_id,
                 self.config.device_id,
                 self.config.access_token,
             )
-        else:
+        elif not self.config.use_password_login:
             self.client.user_id = self.config.user_id
             self.client.device_id = self.config.device_id
             self.client.access_token = self.config.access_token
+        else:
+            response = await self.client.login(
+                password=self.config.password,
+                device_name="MeeChat",
+            )
+            if response.__class__.__name__ != "LoginResponse":
+                await self.emit_error(str(response), where="login")
+                await self.close_client()
+                return
+
+            self.config.user_id = str(
+                getattr(response, "user_id", "")
+                or getattr(self.client, "user_id", "")
+                or client_user
+            )
+            self.config.device_id = str(
+                getattr(response, "device_id", "")
+                or getattr(self.client, "device_id", "")
+                or ""
+            )
+            self.config.access_token = str(
+                getattr(response, "access_token", "")
+                or getattr(self.client, "access_token", "")
+                or ""
+            )
 
         self.client.add_event_callback(self.on_room_message, RoomMessageText)
         self.sync_task = asyncio.create_task(self.sync_loop())
-        await self.emit({"type": "connected", "user_id": self.config.user_id})
 
     async def disconnect(self) -> None:
-        if self.sync_task is not None:
+        current_task = asyncio.current_task()
+        if self.sync_task is not None and self.sync_task is not current_task:
             self.sync_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self.sync_task
             self.sync_task = None
 
+        await self.close_client()
+
+        await self.emit({"type": "disconnected"})
+
+    async def close_client(self) -> None:
         if self.client is not None:
             close = getattr(self.client, "close", None)
             if close is not None:
                 await close()
             self.client = None
-
-        await self.emit({"type": "disconnected"})
+        self.connected = False
 
     async def sync_loop(self) -> None:
         assert self.client is not None
@@ -214,35 +284,53 @@ class MatrixWorker:
         first_sync = True
         backoff = 1
 
-        while True:
-            try:
-                response = await self.client.sync(
-                    timeout=self.config.sync_timeout_ms,
-                    full_state=first_sync,
-                )
-                if response.__class__.__name__ == "SyncResponse":
-                    await self.emit(
-                        {
-                            "type": "sync",
-                            "first": first_sync,
-                            "next_batch": getattr(self.client, "next_batch", ""),
-                        }
+        try:
+            while True:
+                try:
+                    response = await self.client.sync(
+                        timeout=self.config.sync_timeout_ms,
+                        full_state=first_sync,
                     )
-                    await self.emit_rooms()
-                    first_sync = False
-                    backoff = 1
-                    continue
+                    if response.__class__.__name__ == "SyncResponse":
+                        if first_sync:
+                            self.connected = True
+                            await self.emit(
+                                {"type": "connected", "user_id": self.config.user_id}
+                            )
+                        await self.emit(
+                            {
+                                "type": "sync",
+                                "first": first_sync,
+                                "next_batch": getattr(self.client, "next_batch", ""),
+                            }
+                        )
+                        await self.emit_rooms()
+                        first_sync = False
+                        backoff = 1
+                        continue
 
-                await self.emit_error(str(response), where="sync")
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                await self.emit_error(str(exc), where="sync")
-                if self.debug:
-                    traceback.print_exc(file=self.stderr)
+                    if _is_unknown_token_response(response):
+                        await self.emit_error(
+                            _unknown_token_message(response),
+                            where="connect",
+                        )
+                        await self.close_client()
+                        await self.emit({"type": "disconnected"})
+                        return
 
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 30)
+                    await self.emit_error(str(response), where="sync")
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    await self.emit_error(str(exc), where="sync")
+                    if self.debug:
+                        traceback.print_exc(file=self.stderr)
+
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 30)
+        finally:
+            if self.sync_task is asyncio.current_task():
+                self.sync_task = None
 
     async def on_room_message(self, room: Any, event: Any) -> None:
         room_id = getattr(room, "room_id", "")
@@ -363,6 +451,19 @@ def _room_name(room: Any) -> str:
         if value:
             return str(value)
     return str(getattr(room, "room_id", ""))
+
+
+def _is_unknown_token_response(response: Any) -> bool:
+    return getattr(response, "status_code", "") == "M_UNKNOWN_TOKEN"
+
+
+def _unknown_token_message(response: Any) -> str:
+    message = str(getattr(response, "message", "") or response)
+    return (
+        f"{message}; the homeserver rejected the active access token. If auth is "
+        "token, check homeserver, user_id, device_id, and access_token; if auth "
+        "is password, this was the token returned by the login request"
+    )
 
 
 async def async_main(argv: list[str] | None = None) -> int:

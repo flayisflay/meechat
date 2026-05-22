@@ -32,9 +32,12 @@ except ImportError:  # Allows syntax/import checks outside WeeChat.
 
 
 DEFAULT_OPTIONS = {
+    "auth": "auto",
     "homeserver": "",
     "user_id": "",
+    "username": "",
     "access_token": "",
+    "password": "",
     "device_id": "",
     "store_path": "",
     "sync_timeout_ms": "30000",
@@ -44,9 +47,12 @@ DEFAULT_OPTIONS = {
 }
 
 OPTION_DESCRIPTIONS = {
+    "auth": "Authentication mode: auto, token, or password",
     "homeserver": "Matrix homeserver URL, for example https://matrix.org",
     "user_id": "Full Matrix user ID, for example @alice:matrix.org",
+    "username": "Matrix login username, localpart, email, or full user ID",
     "access_token": "Access token, preferably ${sec.data.meechat_access_token}",
+    "password": "Matrix password, preferably ${sec.data.meechat_password}",
     "device_id": "Matrix device ID associated with the access token",
     "store_path": "matrix-nio store directory; empty uses WeeChat config dir",
     "sync_timeout_ms": "Matrix sync long-poll timeout in milliseconds",
@@ -97,26 +103,55 @@ def _worker_path() -> str:
 
 
 def _config_message() -> dict[str, Any] | None:
+    auth = (_option("auth", expand=True) or "auto").lower()
+    user_id = _option("user_id", expand=True)
+    username = _option("username", expand=True) or user_id
     message = {
         "type": "configure",
+        "auth": auth,
         "homeserver": _option("homeserver", expand=True),
-        "user_id": _option("user_id", expand=True),
+        "user_id": user_id,
+        "username": username,
         "access_token": _option("access_token", expand=True),
+        "password": _option("password", expand=True),
         "device_id": _option("device_id", expand=True),
         "store_path": _option("store_path", expand=True) or _default_store_path(),
         "sync_timeout_ms": _option("sync_timeout_ms", expand=True),
     }
 
-    missing = [
-        key
-        for key in ("homeserver", "user_id", "access_token", "device_id")
-        if not str(message[key]).strip()
-    ]
+    missing = []
+    if auth not in {"auto", "token", "password"}:
+        missing.append(
+            "plugins.var.python.meechat.auth must be auto, token, or password"
+        )
+
+    if not str(message["homeserver"]).strip():
+        missing.append("plugins.var.python.meechat.homeserver")
+
+    has_access_token = bool(str(message["access_token"]).strip())
+    has_password = bool(str(message["password"]).strip())
+    use_password = auth == "password" or (auth == "auto" and has_password)
+    use_token = auth == "token" or (auth == "auto" and not use_password)
+
+    if use_password:
+        if not has_password:
+            missing.append("plugins.var.python.meechat.password")
+        if not str(message["username"]).strip():
+            missing.append(
+                "plugins.var.python.meechat.username "
+                "(or plugins.var.python.meechat.user_id)"
+            )
+    elif use_token:
+        if not has_access_token:
+            missing.append("plugins.var.python.meechat.access_token")
+        for key in ("user_id", "device_id"):
+            if not str(message[key]).strip():
+                missing.append("plugins.var.python.meechat." + key)
+
     if missing:
         weechat.prnt(
             "",
-            "meechat: missing required option(s): "
-            + ", ".join("plugins.var.python.meechat." + key for key in missing),
+            "meechat: missing required option(s): " + ", ".join(missing),
         )
         return None
     return message
