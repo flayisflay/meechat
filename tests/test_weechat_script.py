@@ -17,6 +17,10 @@ class FakeWeechat:
         self.bar_item_updates = []
         self.removed_bars = []
         self.removed_bar_items = []
+        self.line_data = {}
+        self.line_updates = []
+        self.last_line_by_lines = {}
+        self.line_data_by_line = {}
 
     def config_get_plugin(self, name):
         defaults = {"auth": "auto", "python": "python3", "debug": "off"}
@@ -51,6 +55,13 @@ class FakeWeechat:
 
     def prnt_date_tags(self, buffer, timestamp, tags, message):
         self.printed_lines.append((buffer, timestamp, tags, message))
+        line_number = len(self.printed_lines)
+        line = f"line-{line_number}"
+        line_data = f"line-data-{line_number}"
+        prefix, _separator, body = message.partition("\t")
+        self.line_data[line_data] = {"prefix": prefix, "message": body}
+        self.line_data_by_line[line] = line_data
+        self.last_line_by_lines[f"lines:{buffer}"] = line
 
     def bar_item_new(self, name, callback, data):
         self.bar_items.append((name, callback, data))
@@ -68,6 +79,25 @@ class FakeWeechat:
 
     def bar_item_remove(self, item):
         self.removed_bar_items.append(item)
+
+    def hdata_get(self, name):
+        return name
+
+    def hdata_pointer(self, hdata, pointer, name):
+        if hdata == "buffer" and name in {"own_lines", "lines"}:
+            return f"lines:{pointer}"
+        if hdata == "lines" and name == "last_line":
+            return self.last_line_by_lines.get(pointer, "")
+        if hdata == "line" and name == "data":
+            return self.line_data_by_line.get(pointer, "")
+        return ""
+
+    def hdata_update(self, hdata, pointer, values):
+        if hdata != "line_data" or pointer not in self.line_data:
+            return 0
+        self.line_updates.append((pointer, values))
+        self.line_data[pointer].update(values)
+        return len(values)
 
     def hook_process_hashtable(self, command, options, timeout, callback, data):
         self.process_calls.append((command, options, timeout, callback, data))
@@ -146,6 +176,7 @@ def test_inspect_monitor_steps_through_room_messages(monkeypatch):
     monkeypatch.setattr(meechat, "ROOM_MESSAGES", {})
     monkeypatch.setattr(meechat, "ROOM_INSPECT_INDEX", {})
     monkeypatch.setattr(meechat, "ROOM_READ_RECEIPTS", {})
+    monkeypatch.setattr(meechat, "ROOM_HIGHLIGHTED_INDEX", {})
     monkeypatch.setattr(meechat, "INSPECT_BAR_ITEM", "")
     monkeypatch.setattr(meechat, "INSPECT_BAR", "")
 
@@ -202,6 +233,7 @@ def test_inspect_monitor_shows_colored_read_receipts(monkeypatch):
     monkeypatch.setattr(meechat, "ROOM_MESSAGES", {})
     monkeypatch.setattr(meechat, "ROOM_INSPECT_INDEX", {})
     monkeypatch.setattr(meechat, "ROOM_READ_RECEIPTS", {})
+    monkeypatch.setattr(meechat, "ROOM_HIGHLIGHTED_INDEX", {})
     monkeypatch.setattr(meechat, "INSPECT_BAR_ITEM", "")
     monkeypatch.setattr(meechat, "INSPECT_BAR", "")
 
@@ -249,6 +281,52 @@ def test_inspect_monitor_shows_colored_read_receipts(monkeypatch):
     assert "read receipts: <red>Bea<reset> <red>Cha<reset>" in rendered
 
 
+def test_inspect_navigation_marks_selected_room_line(monkeypatch):
+    fake = FakeWeechat()
+    monkeypatch.setattr(meechat, "weechat", fake)
+    monkeypatch.setattr(meechat, "ROOM_BUFFERS", {})
+    monkeypatch.setattr(meechat, "BUFFER_ROOMS", {})
+    monkeypatch.setattr(meechat, "ROOM_NAMES", {})
+    monkeypatch.setattr(meechat, "ROOM_MESSAGES", {})
+    monkeypatch.setattr(meechat, "ROOM_INSPECT_INDEX", {})
+    monkeypatch.setattr(meechat, "ROOM_READ_RECEIPTS", {})
+    monkeypatch.setattr(meechat, "ROOM_HIGHLIGHTED_INDEX", {})
+    monkeypatch.setattr(meechat, "INSPECT_BAR_ITEM", "")
+    monkeypatch.setattr(meechat, "INSPECT_BAR", "")
+
+    for event_id, sender, body in (
+        ("$one", "Alice", "first"),
+        ("$two", "Bob", "second"),
+    ):
+        meechat._print_matrix_message(
+            {
+                "room_id": "!room:example",
+                "room_name": "General",
+                "sender": f"@{sender.lower()}:example",
+                "sender_display_name": sender,
+                "body": body,
+                "event_id": event_id,
+                "server_timestamp": 123000,
+            }
+        )
+
+    assert fake.line_updates == []
+
+    meechat.command_cb("", "buffer", "inspect")
+
+    assert fake.line_data["line-data-2"]["prefix"].startswith("<reverse>>> ")
+    assert fake.line_data["line-data-2"]["message"] == "<reverse>second<reset>"
+
+    meechat.command_cb("", "buffer", "inspect-prev")
+
+    assert fake.line_data["line-data-2"] == {
+        "prefix": "<red>Bob<reset>",
+        "message": "second",
+    }
+    assert fake.line_data["line-data-1"]["prefix"].startswith("<reverse>>> ")
+    assert fake.line_data["line-data-1"]["message"] == "<reverse>first<reset>"
+
+
 def test_room_buffer_binds_inspect_navigation_and_creates_top_monitor(monkeypatch):
     fake = FakeWeechat()
     monkeypatch.setattr(meechat, "weechat", fake)
@@ -258,6 +336,7 @@ def test_room_buffer_binds_inspect_navigation_and_creates_top_monitor(monkeypatc
     monkeypatch.setattr(meechat, "ROOM_MESSAGES", {})
     monkeypatch.setattr(meechat, "ROOM_INSPECT_INDEX", {})
     monkeypatch.setattr(meechat, "ROOM_READ_RECEIPTS", {})
+    monkeypatch.setattr(meechat, "ROOM_HIGHLIGHTED_INDEX", {})
     monkeypatch.setattr(meechat, "INSPECT_BAR_ITEM", "")
     monkeypatch.setattr(meechat, "INSPECT_BAR", "")
 

@@ -131,7 +131,8 @@ Common commands:
 Matrix room. MeeChat room buffers bind `Alt+Shift+Up` and `Alt+Shift+Down` to
 inspect older and newer messages in that top monitor. The monitor includes a
 bottom read-receipts row using the colored first three characters of each
-reader's display name.
+reader's display name. While inspecting, the selected message is temporarily
+marked in the room buffer.
 
 Run tests:
 

@@ -72,6 +72,7 @@ ROOM_NAMES: dict[str, str] = {}
 ROOM_MESSAGES: dict[str, list[dict[str, Any]]] = {}
 ROOM_INSPECT_INDEX: dict[str, int] = {}
 ROOM_READ_RECEIPTS: dict[str, dict[str, dict[str, Any]]] = {}
+ROOM_HIGHLIGHTED_INDEX: dict[str, int] = {}
 INSPECT_BAR_ITEM = ""
 INSPECT_BAR = ""
 INSPECT_HISTORY_LIMIT = 500
@@ -370,6 +371,16 @@ def _print_matrix_message(message: dict[str, Any]) -> None:
     timestamp_ms = int(message.get("server_timestamp") or 0)
     timestamp = timestamp_ms // 1000 if timestamp_ms else 0
     event_id = str(message.get("event_id") or "")
+    tags = "notify_message"
+    if sender:
+        tags += ",nick_" + sender
+    prefix = _colored_nick(sender_display_name)
+    weechat.prnt_date_tags(
+        buffer,
+        timestamp,
+        tags,
+        f"{prefix}\t{body}",
+    )
     _record_room_message(
         room_id,
         {
@@ -378,16 +389,10 @@ def _print_matrix_message(message: dict[str, Any]) -> None:
             "sender_display_name": sender_display_name,
             "body": body,
             "timestamp": timestamp,
+            "line_data": _last_printed_line_data(buffer),
+            "line_prefix": prefix,
+            "line_message": body,
         },
-    )
-    tags = "notify_message"
-    if sender:
-        tags += ",nick_" + sender
-    weechat.prnt_date_tags(
-        buffer,
-        timestamp,
-        tags,
-        f"{_colored_nick(sender_display_name)}\t{body}",
     )
 
 
@@ -395,10 +400,13 @@ def _record_room_message(room_id: str, message: dict[str, Any]) -> None:
     messages = ROOM_MESSAGES.setdefault(room_id, [])
     selected = ROOM_INSPECT_INDEX.get(room_id)
     was_at_end = selected is None or selected >= len(messages) - 1
+    highlight_active = room_id in ROOM_HIGHLIGHTED_INDEX
 
     messages.append(message)
     if len(messages) > INSPECT_HISTORY_LIMIT:
         overflow = len(messages) - INSPECT_HISTORY_LIMIT
+        if highlight_active:
+            _restore_inspect_highlight(room_id)
         del messages[:overflow]
         if selected is not None:
             ROOM_INSPECT_INDEX[room_id] = max(0, selected - overflow)
@@ -406,6 +414,8 @@ def _record_room_message(room_id: str, message: dict[str, Any]) -> None:
     if was_at_end or room_id not in ROOM_INSPECT_INDEX:
         ROOM_INSPECT_INDEX[room_id] = len(messages) - 1
 
+    if highlight_active:
+        _highlight_inspect_message(room_id)
     _update_inspect_bar()
 
 
@@ -438,6 +448,7 @@ def _show_inspect(buffer: str) -> None:
 
     _ensure_inspect_bar()
     _select_inspect_room(room_id)
+    _highlight_inspect_message(room_id)
     _update_inspect_bar()
 
 
@@ -456,6 +467,7 @@ def _inspect_step(buffer: str, direction: int) -> None:
             0,
             min(len(messages) - 1, index + direction),
         )
+    _highlight_inspect_message(room_id)
     _update_inspect_bar()
 
 
@@ -467,6 +479,82 @@ def _select_inspect_room(room_id: str) -> None:
     messages = ROOM_MESSAGES.get(room_id, [])
     if messages and room_id not in ROOM_INSPECT_INDEX:
         ROOM_INSPECT_INDEX[room_id] = len(messages) - 1
+
+
+def _highlight_inspect_message(room_id: str) -> None:
+    _restore_inspect_highlight(room_id)
+
+    messages = ROOM_MESSAGES.get(room_id, [])
+    if not messages:
+        return
+
+    index = max(
+        0,
+        min(len(messages) - 1, ROOM_INSPECT_INDEX.get(room_id, len(messages) - 1)),
+    )
+    if _update_message_line(messages[index], selected=True):
+        ROOM_HIGHLIGHTED_INDEX[room_id] = index
+
+
+def _restore_inspect_highlight(room_id: str) -> None:
+    index = ROOM_HIGHLIGHTED_INDEX.pop(room_id, None)
+    messages = ROOM_MESSAGES.get(room_id, [])
+    if index is None or index >= len(messages):
+        return
+
+    _update_message_line(messages[index], selected=False)
+
+
+def _restore_all_inspect_highlights() -> None:
+    for room_id in list(ROOM_HIGHLIGHTED_INDEX):
+        _restore_inspect_highlight(room_id)
+
+
+def _update_message_line(message: dict[str, Any], *, selected: bool) -> bool:
+    line_data = str(message.get("line_data") or "")
+    if not line_data or not hasattr(weechat, "hdata_update"):
+        return False
+
+    prefix = str(message.get("line_prefix") or "")
+    body = str(message.get("line_message") or message.get("body") or "")
+    if selected:
+        reset = weechat.color("reset")
+        prefix = f"{weechat.color('reverse')}>> {prefix}{reset}"
+        body = f"{weechat.color('reverse')}{body}{reset}"
+
+    try:
+        updated = weechat.hdata_update(
+            weechat.hdata_get("line_data"),
+            line_data,
+            {"prefix": prefix, "message": body},
+        )
+    except Exception:
+        return False
+    return bool(updated)
+
+
+def _last_printed_line_data(buffer: str) -> str:
+    for name in ("own_lines", "lines"):
+        line_data = _last_printed_line_data_from_lines(buffer, name)
+        if line_data:
+            return line_data
+    return ""
+
+
+def _last_printed_line_data_from_lines(buffer: str, lines_name: str) -> str:
+    if not hasattr(weechat, "hdata_pointer"):
+        return ""
+
+    try:
+        lines = weechat.hdata_pointer(weechat.hdata_get("buffer"), buffer, lines_name)
+        if not lines:
+            return ""
+        line = weechat.hdata_pointer(weechat.hdata_get("lines"), lines, "last_line")
+        if not line:
+            return ""
+        return str(weechat.hdata_pointer(weechat.hdata_get("line"), line, "data"))
+    except Exception:
+        return ""
 
 
 def _ensure_inspect_bar() -> None:
@@ -696,6 +784,7 @@ def room_input_cb(data: str, buffer: str, input_data: str) -> int:
 def room_close_cb(data: str, buffer: str) -> int:
     room_id = data or BUFFER_ROOMS.get(buffer, "")
     if room_id:
+        _restore_inspect_highlight(room_id)
         ROOM_BUFFERS.pop(room_id, None)
         ROOM_MESSAGES.pop(room_id, None)
         ROOM_INSPECT_INDEX.pop(room_id, None)
@@ -706,6 +795,7 @@ def room_close_cb(data: str, buffer: str) -> int:
 
 
 def script_unload_cb() -> int:
+    _restore_all_inspect_highlights()
     if WORKER_HOOK:
         _send_to_worker({"type": "shutdown"})
     _remove_inspect_bar()
