@@ -183,11 +183,33 @@ def _command_summary(args: str) -> str:
 def _init_options() -> None:
     _log("initializing plugin options")
     for name, default in DEFAULT_OPTIONS.items():
+        default_value = _default_python() if name == "python" else default
         if not weechat.config_is_set_plugin(name):
-            _log(f"creating option plugins.var.python.meechat.{name}={default!r}")
-            weechat.config_set_plugin(name, default)
+            _log(
+                "creating option "
+                f"plugins.var.python.meechat.{name}={default_value!r}"
+            )
+            weechat.config_set_plugin(name, default_value)
         weechat.config_set_desc_plugin(name, OPTION_DESCRIPTIONS[name])
     _log("plugin options initialized")
+
+
+def _venv_python_path() -> str:
+    return os.path.join(SCRIPT_DIR, ".venv", "bin", "python")
+
+
+def _default_python() -> str:
+    venv_python = _venv_python_path()
+    if os.path.isfile(venv_python) and os.access(venv_python, os.X_OK):
+        return venv_python
+    return "python3"
+
+
+def _worker_python() -> str:
+    configured = str(_option("python", expand=True) or "").strip()
+    if configured and configured != "python3":
+        return configured
+    return _default_python()
 
 
 def _default_store_path() -> str:
@@ -282,7 +304,7 @@ def _start_worker() -> bool:
         _log(f"worker already started; hook={WORKER_HOOK}")
         return True
 
-    python = _option("python", expand=True) or "python3"
+    python = _worker_python()
     options = {"arg1": _worker_path(), "stdin": "1", "buffer_flush": "1"}
     if _option_bool("debug"):
         options["arg2"] = "--debug"

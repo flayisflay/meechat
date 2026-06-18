@@ -265,6 +265,42 @@ def test_start_worker_flushes_process_output_immediately(monkeypatch):
     assert options["buffer_flush"] == "1"
 
 
+def test_start_worker_uses_local_venv_python_for_default_option(monkeypatch, tmp_path):
+    venv_bin = tmp_path / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    venv_python = venv_bin / "python"
+    venv_python.write_text("#!/bin/sh\n")
+    venv_python.chmod(0o755)
+
+    fake = FakeWeechat()
+    monkeypatch.setattr(meechat, "SCRIPT_DIR", str(tmp_path))
+    monkeypatch.setattr(meechat, "weechat", fake)
+    monkeypatch.setattr(meechat, "WORKER_HOOK", "")
+
+    assert meechat._start_worker()
+
+    command, _options, _timeout, _callback, _data = fake.process_calls[0]
+    assert command == str(venv_python)
+
+
+def test_start_worker_keeps_custom_python_option(monkeypatch, tmp_path):
+    venv_bin = tmp_path / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    venv_python = venv_bin / "python"
+    venv_python.write_text("#!/bin/sh\n")
+    venv_python.chmod(0o755)
+
+    fake = FakeWeechat({"python": "/custom/python"})
+    monkeypatch.setattr(meechat, "SCRIPT_DIR", str(tmp_path))
+    monkeypatch.setattr(meechat, "weechat", fake)
+    monkeypatch.setattr(meechat, "WORKER_HOOK", "")
+
+    assert meechat._start_worker()
+
+    command, _options, _timeout, _callback, _data = fake.process_calls[0]
+    assert command == "/custom/python"
+
+
 def test_config_message_password_auth_ignores_stale_token_requirement(monkeypatch):
     fake = FakeWeechat(
         {
