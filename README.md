@@ -61,8 +61,8 @@ Token auth:
 
 ```text
 /secure set meechat_access_token <access-token>
-/set plugins.var.python.meechat.homeserver "https://matrix.example.org"
-/set plugins.var.python.meechat.user_id "@alice:example.org"
+/set plugins.var.python.meechat.homeserver "https://matrix.example.org" or in our case "https://matrix.cclub.cs.wmich.edu"
+/set plugins.var.python.meechat.user_id "@alice:example.org" or seemingly just your case sensitive uname
 /set plugins.var.python.meechat.access_token "${sec.data.meechat_access_token}"
 ```
 
