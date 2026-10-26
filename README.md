@@ -1,6 +1,6 @@
 # MeeChat
 
-Small Matrix adapter for WeeChat.
+A (supposedly working) Matrix script for WeeChat for 2026
 
 ## Install
 
