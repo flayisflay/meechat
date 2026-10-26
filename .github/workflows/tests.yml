@@ -1,0 +1,30 @@
+name: Tests
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.10", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - name: Check installer syntax
+        run: /bin/bash -n install.sh
+      - name: Install test dependencies
+        run: uv sync --locked --extra dev --python "$(python -c 'import sys; print(sys.executable)')"
+      - name: Run tests and fresh installer checks
+        env:
+          MEECHAT_TEST_INSTALL: "1"
+        run: uv run --locked --extra dev pytest
