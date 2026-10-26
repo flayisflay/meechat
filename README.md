@@ -5,12 +5,8 @@ Small Matrix adapter for WeeChat.
 ## Install
 
 Requirements: macOS or Linux, Bash 3.2 or newer, and WeeChat with its Python
-plugin. Install either `uv` (which can find or download a suitable Python) or
-Python 3.10+ with `venv` and `ensurepip` support. On Debian/Ubuntu, the
-`python3-venv` package provides that support. Dependency downloads need network
-access; platforms without compatible binary wheels may also need build tools.
+plugin as well as uv which handles the python 3.10 installation.
 
-Keep this checkout in a permanent, user-writable location, then run:
 
 ```sh
 ./install.sh
@@ -59,7 +55,7 @@ with Matrix dependencies. It uses `.venv` if available, otherwise `PYTHON` or
 `python3`. Verification failures return a nonzero exit status before linking.
 Existing regular files at the destination are preserved.
 
-## Configure
+## Configuration & Connecting to Chat
 
 Token auth:
 
@@ -86,7 +82,9 @@ Optional:
 /set plugins.var.python.meechat.autoconnect on
 ```
 
-## Usage
+## Usage / Magic
+This uses a lot of the oldschool irc idioms with some new usability features custom to our setup. I've added read receipts, replies, and for some reason emoji.
+
 
 ```text
 /meechat connect
